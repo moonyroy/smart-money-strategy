@@ -1,0 +1,123 @@
+//@version=5
+indicator("Zig Zag", overlay=true, max_lines_count=500)
+
+pivotPeriod  = input.int(5, "Pivot Period", minval=1)
+lineStyleStr = input.string("Solid", "Line Style", options=["Solid", "Dotted", "Dashed"])
+lineColor    = input.color(#2484bb, "Line Color")
+lineWidth    = input.int(1, "Line Width", minval=1)
+
+lineStyle = lineStyleStr == "Solid" ? line.style_solid : lineStyleStr == "Dotted" ? line.style_dotted : line.style_dashed
+
+var pivotTypes   = array.new_string()
+var pivotValues  = array.new_float()
+var pivotIndexes = array.new_int()
+var line zigzagLine = na
+
+pushPivot(bool isHigh, float val, int idx) =>
+    int n = array.size(pivotTypes)
+    string t = isHigh ? "H" : "L"
+    if n > 2
+        float prev = array.get(pivotValues, n - 2)
+        t := isHigh ? (prev < val ? "HH" : "LH") : (prev < val ? "HL" : "LL")
+    array.push(pivotTypes, t)
+    array.push(pivotValues, val)
+    array.push(pivotIndexes, idx)
+    true
+
+popPivot() =>
+    array.pop(pivotTypes)
+    array.pop(pivotValues)
+    array.pop(pivotIndexes)
+    true
+
+pivH = ta.pivothigh(pivotPeriod, pivotPeriod)
+pivL = ta.pivotlow(pivotPeriod, pivotPeriod)
+hp = not na(pivH)
+lp = not na(pivL)
+
+valH = ta.valuewhen(hp, high[pivotPeriod], 0)
+valL = ta.valuewhen(lp, low[pivotPeriod], 0)
+idxH = ta.valuewhen(hp, bar_index[pivotPeriod], 0)
+idxL = ta.valuewhen(lp, bar_index[pivotPeriod], 0)
+
+int n = array.size(pivotTypes)
+string lastType = n > 0 ? array.get(pivotTypes, n - 1) : ""
+float lastValue = n > 0 ? array.get(pivotValues, n - 1) : na
+
+lastLow  = lastType == "L" or lastType == "LL"
+lastHigh = lastType == "H" or lastType == "HH"
+lastLH   = lastType == "LH"
+lastHL   = lastType == "HL"
+
+if hp and lp
+    if n >= 1
+        if lastLow
+            if pivL < lastValue
+                popPivot()
+                pushPivot(false, valL, idxL)
+            else
+                pushPivot(true, valH, idxH)
+        else if lastHigh
+            if pivH > lastValue
+                popPivot()
+                pushPivot(true, valH, idxH)
+            else
+                pushPivot(false, valL, idxL)
+        else if lastLH
+            if pivH < lastValue
+                pushPivot(false, valL, idxL)
+            else if pivH > lastValue
+                if close < lastValue
+                    popPivot()
+                    pushPivot(true, valH, idxH)
+                else if close > lastValue
+                    pushPivot(false, valL, idxL)
+        else if lastHL
+            if pivL > lastValue
+                pushPivot(true, valH, idxH)
+            else if pivL < lastValue
+                if close > lastValue
+                    popPivot()
+                    pushPivot(false, valL, idxL)
+                else if close < lastValue
+                    pushPivot(true, valH, idxH)
+
+else if hp
+    if n == 0
+        pushPivot(true, valH, idxH)
+    else if lastLow or lastHL
+        if pivH > lastValue
+            pushPivot(true, valH, idxH)
+        else if pivH < lastValue
+            popPivot()
+            pushPivot(false, valL, idxL)
+    else if lastHigh or lastLH
+        if lastValue < valH
+            popPivot()
+            pushPivot(true, valH, idxH)
+
+else if lp
+    if n == 0
+        pushPivot(false, valL, idxL)
+    else if lastHigh or lastLH
+        if pivL < lastValue
+            pushPivot(false, valL, idxL)
+        else if pivL > lastValue
+            popPivot()
+            pushPivot(true, valH, idxH)
+    else if lastLow or lastHL
+        if lastValue > valL
+            popPivot()
+            pushPivot(false, valL, idxL)
+
+int size = array.size(pivotValues)
+if size >= 2
+    int x1 = array.get(pivotIndexes, size - 2)
+    float y1 = array.get(pivotValues, size - 2)
+    int x2 = array.get(pivotIndexes, size - 1)
+    float y2 = array.get(pivotValues, size - 1)
+
+    if na(zigzagLine) or line.get_x1(zigzagLine) != x1
+        zigzagLine := line.new(x1, y1, x2, y2, color=lineColor, style=lineStyle, width=lineWidth)
+    else
+        line.set_xy2(zigzagLine, x2, y2)

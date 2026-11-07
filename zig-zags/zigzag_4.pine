@@ -1,0 +1,52 @@
+//@version=6
+indicator("SwingZag Zig Zag", overlay=true, max_lines_count=500)
+
+lineColor   = input.color(color.white, "ZigZag Line Color")
+lineWidth   = input.int(1, "Line Width", minval=1)
+priceSource = input.string("Wicks", "ZigZag Plot on:", options=["Wicks", "Bodies"])
+
+linePrice(bool isHigh, int barIdx) =>
+    lookback = bar_index - barIdx
+    if priceSource == "Wicks"
+        isHigh ? high[lookback] : low[lookback]
+    else
+        isHigh ? math.max(open[lookback], close[lookback]) : math.min(open[lookback], close[lookback])
+
+var float extLow = na
+var int extLowIndex = na
+var float extHigh = na
+var int extHighIndex = na
+
+var float lastPrice = na
+var int lastIndex = na
+var bool lookingForLow = true
+
+if low < extLow or na(extLow)
+    extLow := low
+    extLowIndex := bar_index
+
+if lookingForLow and not na(extLow) and close > high[1]
+    float price = linePrice(false, extLowIndex)
+    if not na(lastPrice)
+        line.new(lastIndex, lastPrice, extLowIndex, price, color=lineColor, width=lineWidth)
+    lastPrice := price
+    lastIndex := extLowIndex
+    lookingForLow := false
+    extLow := na
+    extHigh := high
+    extHighIndex := bar_index
+
+if high > extHigh or na(extHigh)
+    extHigh := high
+    extHighIndex := bar_index
+
+if not lookingForLow and not na(extHigh) and close < low[1]
+    float price = linePrice(true, extHighIndex)
+    if not na(lastPrice)
+        line.new(lastIndex, lastPrice, extHighIndex, price, color=lineColor, width=lineWidth)
+    lastPrice := price
+    lastIndex := extHighIndex
+    lookingForLow := true
+    extHigh := na
+    extLow := low
+    extLowIndex := bar_index

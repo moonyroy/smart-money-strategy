@@ -1,0 +1,183 @@
+//@version=6
+indicator("Zig Zag", overlay=true, max_lines_count=500, max_bars_back=5000)
+
+htf          = input.timeframe("", "Timeframe")
+srcInput     = input.string("HL2", "Reversal Source", options=["Open", "Close", "HL2", "HLC3", "OHLC4", "HLCC4"])
+loopback     = input.int(5, "Loopback Length", minval=1)
+smaLen       = input.int(2, "SMA Length (Internal)", minval=1)
+smaLen2      = input.int(5, "SMA Length (Structure)", minval=1)
+lineColor    = input.color(color.black, "Line Color")
+lineWidth    = input.int(2, "Line Width", minval=1, maxval=10)
+lineStyleStr = input.string("Solid", "Line Style", options=["Solid", "Dotted", "Dashed"])
+
+maxHistory = 5000
+lineStyle  = lineStyleStr == "Solid" ? line.style_solid : lineStyleStr == "Dotted" ? line.style_dotted : line.style_dashed
+
+[hH, hL, hC, hO, hHL2, hHLC3, hOHLC4, hHLCC4] = request.security(syminfo.tickerid, htf, [high, low, close, open, hl2, hlc3, ohlc4, hlcc4])
+
+float htfSrc = switch srcInput
+    "Open"  => hO
+    "Close" => hC
+    "HL2"   => hHL2
+    "HLC3"  => hHLC3
+    "OHLC4" => hOHLC4
+    => hHLCC4
+
+smaClose  = ta.sma(hC, smaLen)
+smaClose2 = ta.sma(hC, smaLen2)
+
+regLine = ta.linreg(htfSrc, loopback, 0)
+upTrigger   = regLine > regLine[1]
+downTrigger = regLine < regLine[1]
+
+var int lastBullIndex = na
+var int lastBearIndex = na
+var int lastInternalShift = 0
+
+if upTrigger
+    lastBullIndex := bar_index - 1
+if downTrigger
+    lastBearIndex := bar_index - 1
+
+bearShift = downTrigger and lastInternalShift != -1
+bullShift = upTrigger and lastInternalShift != 1
+
+if bearShift
+    lastInternalShift := -1
+if bullShift
+    lastInternalShift := 1
+
+var float localHigh = na
+var float localLow = na
+var float ctrlHigh = na
+var float ctrlLow = na
+var int lastShiftType = na
+
+if bearShift and not na(lastBullIndex)
+    float bestHigh = na
+    for i = math.max(lastBullIndex, bar_index - maxHistory) to bar_index
+        lb = bar_index - i
+        if lb < maxHistory and not na(hH[lb])
+            if na(bestHigh) or hH[lb] > bestHigh
+                bestHigh := hH[lb]
+    prevLocalHigh = localHigh
+    localHigh := bestHigh
+    if lastShiftType == 1 or localHigh < prevLocalHigh
+        ctrlHigh := localHigh
+
+if bullShift and not na(lastBearIndex)
+    float bestLow = na
+    for i = math.max(lastBearIndex, bar_index - maxHistory) to bar_index
+        lb = bar_index - i
+        if lb < maxHistory and not na(hL[lb])
+            if na(bestLow) or hL[lb] < bestLow
+                bestLow := hL[lb]
+    prevLocalLow = localLow
+    localLow := bestLow
+    if lastShiftType == -1 or localLow > prevLocalLow
+        ctrlLow := localLow
+
+var bool canBreakBull = true
+var bool canBreakBear = true
+var float bullInflectionHigh = na
+var float bearInflectionLow = na
+
+bullBoS = canBreakBull and smaClose > localHigh
+bearBoS = canBreakBear and smaClose < localLow
+
+if bullBoS
+    canBreakBull := false
+    bearInflectionLow := localLow
+if bearBoS
+    canBreakBear := false
+    bullInflectionHigh := localHigh
+
+if ta.change(localHigh) != 0
+    canBreakBull := true
+if ta.change(localLow) != 0
+    canBreakBear := true
+
+var float shiftHigh = na
+var int   shiftHighIndex = na
+var float shiftLow = na
+var int   shiftLowIndex = na
+var int   lastBullShiftBar = na
+var int   lastBearShiftBar = na
+
+canBull = na(lastShiftType) or lastShiftType != 1
+canBear = na(lastShiftType) or lastShiftType != -1
+
+structBull = not na(bullInflectionHigh) and canBull and smaClose > ctrlHigh
+structBear = not na(bearInflectionLow) and canBear and smaClose < ctrlLow
+
+if structBear
+    float bestHigh = na
+    int bestIdx = na
+    int startIdx = na(lastBullShiftBar) ? math.max(0, bar_index - maxHistory) : shiftLowIndex
+    for i = startIdx to bar_index
+        lb = bar_index - i
+        if lb < maxHistory and not na(hH[lb])
+            if na(bestHigh) or hH[lb] > bestHigh
+                bestHigh := hH[lb]
+                bestIdx := i
+    shiftHigh := bestHigh
+    shiftHighIndex := bestIdx
+    lastShiftType := -1
+    lastBearShiftBar := bar_index
+
+if structBull
+    float bestLow = na
+    int bestIdx = na
+    int startIdx = na(lastBearShiftBar) ? math.max(0, bar_index - maxHistory) : shiftHighIndex
+    for i = startIdx to bar_index
+        lb = bar_index - i
+        if lb < maxHistory and not na(hL[lb])
+            if na(bestLow) or hL[lb] < bestLow
+                bestLow := hL[lb]
+                bestIdx := i
+    shiftLow := bestLow
+    shiftLowIndex := bestIdx
+    lastShiftType := 1
+    lastBullShiftBar := bar_index
+
+// Zig-zag
+drawZigZag(int x1, float y1, int x2, float y2) =>
+    if not na(x1) and not na(y1) and not na(x2) and not na(y2)
+        line.new(x1, y1, x2, y2, color=lineColor, width=lineWidth, style=lineStyle)
+
+var float prevSwingHigh = na
+var float prevSwingLow = na
+var float lastSwingHigh2 = na
+var float lastSwingLow2 = na
+
+if structBull
+    if not na(prevSwingLow)
+        drawZigZag(shiftHighIndex, shiftHigh, shiftLowIndex, shiftLow)
+    prevSwingLow := shiftLow
+    lastSwingLow2 := shiftLow
+
+if structBear
+    if not na(prevSwingHigh)
+        drawZigZag(shiftLowIndex, shiftLow, shiftHighIndex, shiftHigh)
+    prevSwingHigh := shiftHigh
+    lastSwingHigh2 := shiftHigh
+
+var int chochState = 0
+
+bullBreak = ta.crossover(smaClose2, shiftHigh) and chochState != 1
+bearBreak = ta.crossunder(smaClose2, shiftLow) and chochState != -1
+
+if bullBreak
+    shiftHigh := na
+    chochState := 1
+    bearInflectionLow := shiftLow
+
+if bearBreak
+    shiftLow := na
+    chochState := -1
+    bullInflectionHigh := shiftHigh
+
+if not na(lastSwingHigh2) and smaClose2 > shiftHigh
+    shiftHigh := na
+if not na(lastSwingLow2) and smaClose2 < shiftLow
+    shiftLow := na

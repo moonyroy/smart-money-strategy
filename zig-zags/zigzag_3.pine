@@ -1,0 +1,43 @@
+//@version=5
+indicator("Zig Zag", overlay=true, max_lines_count=500)
+
+length    = input.int(5, "Swing Sensibilität (Pivot Length)", minval=1, tooltip="Wert 1 zeigt jede winzige Bewegung (Mikro-Struktur).")
+upColor   = input.color(color.green, "Aufwärts-Swing")
+downColor = input.color(color.red, "Abwärts-Swing")
+lineWidth = input.int(2, "Linien-Dicke", minval=1, maxval=4)
+
+ph = ta.pivothigh(high, length, length)
+pl = ta.pivotlow(low, length, length)
+
+var int dir = 0
+var float lastVal = na
+var int lastLoc = na
+var line currentLine = na
+
+pivotIndex = bar_index - length
+
+if not na(ph)
+    if dir != 1
+        if dir != 0
+            currentLine := line.new(lastLoc, lastVal, pivotIndex, ph, color=upColor, width=lineWidth)
+        dir := 1
+        lastVal := ph
+        lastLoc := pivotIndex
+    else if ph > lastVal
+        if not na(currentLine)
+            line.set_xy2(currentLine, pivotIndex, ph)
+        lastVal := ph
+        lastLoc := pivotIndex
+
+if not na(pl)
+    if dir != -1
+        if dir != 0
+            currentLine := line.new(lastLoc, lastVal, pivotIndex, pl, color=downColor, width=lineWidth)
+        dir := -1
+        lastVal := pl
+        lastLoc := pivotIndex
+    else if pl < lastVal
+        if not na(currentLine)
+            line.set_xy2(currentLine, pivotIndex, pl)
+        lastVal := pl
+        lastLoc := pivotIndex
