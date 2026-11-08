@@ -1,0 +1,381 @@
+//@version=6
+indicator("🍭🐰", overlay = true, behind_chart = false, max_lines_count = 500, max_labels_count = 500)
+
+mode_input  = input.string("normal", "mode", options=["normal", "reset on outside bar"])
+break_input = input.string("close", "BMS / CHoCH break by", options=["close", "wick"])
+col_bos     = input.color(#4fc3f7, "BMS color")
+col_choch   = input.color(#ff6ec7, "CHoCH color")
+col_zz      = input.color(color.white, "zigzag color")
+show_bg     = input.bool(true, "trend background")
+col_bull    = input.color(#4fc3f7, "bullish trend background")
+col_bear    = input.color(#ff6ec7, "bearish trend background")
+bg_transp   = input.int(88, "background transparency", minval = 0, maxval = 100)
+show_key    = input.bool(false, "show key level")
+use_wick    = break_input == "wick"
+
+var string stn = ""
+var float HI = na , var float LO = na
+var bool outsidebar = false , var int init_bar = na
+var float init_open = na , var float init_high = na
+var float init_low = na , var int prev_pivot_bar = na
+var float prev_pivot_price = na , var int cur_pivot_bar = na
+var float cur_pivot_price = na , var line cur_line = na
+break_high = high > HI , break_low = low < LO
+
+only_high = break_high and not break_low
+only_low = break_low and not break_high
+both_broken = break_high and break_low
+neither_broken = not break_high and not break_low
+
+var array<int>   pv_bar    = array.new<int>()
+var array<float> pv_price  = array.new<float>()
+var array<bool>  pv_isHigh = array.new<bool>()
+var int   trend        = 0
+var float key_price    = na
+var int   key_bar      = na
+var int   last_leg_bar = -1
+
+var line  ev_line = na
+var label ev_lbl  = na
+var float ev_lvl  = na
+var int   ev_x1   = na
+var int   ev_leg  = na
+var int   ev_dir  = 0
+var bool  ev_live = false
+var array<int> fl_x = array.new<int>()
+var array<int> fl_t = array.new<int>()
+var int ev_fl = -1
+
+update_endpoint(int x, float y) =>
+    line.set_x2(cur_line, x)
+    line.set_y2(cur_line, y)
+
+new_segment(int x1, float y1, int x2, float y2) =>
+    line.new(x1=x1, y1=y1, x2=x2, y2=y2, color=col_zz)
+
+confirm_pivot(int b, float p, bool isHigh) =>
+    if barstate.isconfirmed
+        array.push(pv_bar, b)
+        array.push(pv_price, p)
+        array.push(pv_isHigh, isHigh)
+        if array.size(pv_bar) > 200
+            array.shift(pv_bar)
+            array.shift(pv_price)
+            array.shift(pv_isHigh)
+
+find_idx(array<bool> t, int start_i, bool want) =>
+    int res = -1
+    int i = start_i
+    while i >= 0 and res == -1
+        if array.get(t, i) == want
+            res := i
+        i -= 1
+    res
+
+trend_at(int j) =>
+    int res = 0
+    int i = array.size(fl_x) - 1
+    bool found = false
+    while i >= 0 and not found
+        if array.get(fl_x, i) <= j
+            res := array.get(fl_t, i)
+            found := true
+        i -= 1
+    res
+
+bull_bms(float lvl) => use_wick ? high > lvl : close > lvl
+bear_bms(float lvl) => use_wick ? low < lvl : close < lvl
+
+bull_break(float lvl) => use_wick ? high >= lvl : close >= lvl
+bear_break(float lvl) => use_wick ? low <= lvl : close <= lvl
+
+cross_x(float lvl, int fb, int dir) =>
+    int res = fb
+    if not na(prev_pivot_bar) and not na(cur_pivot_bar) and cur_pivot_bar > prev_pivot_bar
+        float y1 = prev_pivot_price
+        float y2 = cur_pivot_price
+        bool right_dir = dir == 1 ? y2 > y1 : y2 < y1
+        if right_dir and lvl >= math.min(y1, y2) and lvl <= math.max(y1, y2)
+            float f = (lvl - y1) / (y2 - y1)
+            res := prev_pivot_bar + int(math.round(f * (cur_pivot_bar - prev_pivot_bar)))
+    res
+
+new_ev_line(int x1, int x2, float y, color c) =>
+    line.new(x1=x1, y1=y, x2=x2, y2=y, color=c, width=1)
+
+blend(color base, color tint, float a) =>
+    color.rgb(color.r(base) * (1 - a) + color.r(tint) * a, color.g(base) * (1 - a) + color.g(tint) * a, color.b(base) * (1 - a) + color.b(tint) * a)
+
+new_ev_label(int x1, int x2, float y, string txt, color c, color bgc) =>
+    label.new(x=int(math.round((x1 + x2) / 2.0)), y=y, text=txt, style=label.style_label_center, color=bgc, textcolor=c, size=size.small)
+
+if stn == ""
+    if na(HI)
+        HI := high
+        LO := low
+        init_bar := bar_index
+        init_open := open
+        init_high := high
+        init_low := low
+    else
+        if only_high
+            confirm_pivot(init_bar, init_low, false)
+            cur_line := new_segment(init_bar, init_low, bar_index, high)
+            prev_pivot_bar := init_bar
+            prev_pivot_price := init_low
+            cur_pivot_bar := bar_index
+            cur_pivot_price := high
+            stn := "top"
+            HI := high
+            LO := low
+            outsidebar := false
+        else if only_low
+            confirm_pivot(init_bar, init_high, true)
+            cur_line := new_segment(init_bar, init_high, bar_index, low)
+            prev_pivot_bar := init_bar
+            prev_pivot_price := init_high
+            cur_pivot_bar := bar_index
+            cur_pivot_price := low
+            stn := "bot"
+            HI := high
+            LO := low
+            outsidebar := false
+        else if both_broken
+            dist_high = math.abs(init_open - high)
+            dist_low = math.abs(init_open - low)
+            if dist_high <= dist_low
+                confirm_pivot(init_bar, init_low, false)
+                confirm_pivot(bar_index, high, true)
+                new_segment(init_bar, init_low, bar_index, high)
+                cur_line := new_segment(bar_index, high, bar_index, low)
+                prev_pivot_bar := bar_index
+                prev_pivot_price := high
+                cur_pivot_bar := bar_index
+                cur_pivot_price := low
+                stn := "bot"
+            else
+                confirm_pivot(init_bar, init_high, true)
+                confirm_pivot(bar_index, low, false)
+                new_segment(init_bar, init_high, bar_index, low)
+                cur_line := new_segment(bar_index, low, bar_index, high)
+                prev_pivot_bar := bar_index
+                prev_pivot_price := low
+                cur_pivot_bar := bar_index
+                cur_pivot_price := high
+                stn := "top"
+            HI := high
+            LO := low
+            outsidebar := false
+        else
+            outsidebar := false
+else if stn == "top"
+    if only_high
+        update_endpoint(bar_index, high)
+        cur_pivot_bar := bar_index
+        cur_pivot_price := high
+        HI := high
+        LO := low
+        outsidebar := false
+    else if only_low
+        confirm_pivot(cur_pivot_bar, cur_pivot_price, true)
+        cur_line := new_segment(cur_pivot_bar, cur_pivot_price, bar_index, low)
+        prev_pivot_bar := cur_pivot_bar
+        prev_pivot_price := cur_pivot_price
+        cur_pivot_bar := bar_index
+        cur_pivot_price := low
+        stn := "bot"
+        HI := high
+        LO := low
+        outsidebar := false
+    else if both_broken
+        dist_high = math.abs(cur_pivot_price - high)
+        dist_low = math.abs(cur_pivot_price - low)
+        if dist_high <= dist_low
+            confirm_pivot(bar_index, high, true)
+            update_endpoint(bar_index, high)
+            cur_line := new_segment(bar_index, high, bar_index, low)
+            prev_pivot_bar := bar_index
+            prev_pivot_price := high
+            cur_pivot_bar := bar_index
+            cur_pivot_price := low
+            stn := "bot"
+        else
+            confirm_pivot(cur_pivot_bar, cur_pivot_price, true)
+            confirm_pivot(bar_index, low, false)
+            cur_line := new_segment(cur_pivot_bar, cur_pivot_price, bar_index, low)
+            cur_line := new_segment(bar_index, low, bar_index, high)
+            prev_pivot_bar := bar_index
+            prev_pivot_price := low
+            cur_pivot_bar := bar_index
+            cur_pivot_price := high
+            stn := "top"
+        HI := high
+        LO := low
+        outsidebar := false
+    else
+        outsidebar := true
+else if stn == "bot"
+    if only_low
+        update_endpoint(bar_index, low)
+        cur_pivot_bar := bar_index
+        cur_pivot_price := low
+        HI := high
+        LO := low
+        outsidebar := false
+    else if only_high
+        confirm_pivot(cur_pivot_bar, cur_pivot_price, false)
+        cur_line := new_segment(cur_pivot_bar, cur_pivot_price, bar_index, high)
+        prev_pivot_bar := cur_pivot_bar
+        prev_pivot_price := cur_pivot_price
+        cur_pivot_bar := bar_index
+        cur_pivot_price := high
+        stn := "top"
+        HI := high
+        LO := low
+        outsidebar := false
+    else if both_broken
+        dist_high = math.abs(cur_pivot_price - high)
+        dist_low = math.abs(cur_pivot_price - low)
+        if dist_low <= dist_high
+            confirm_pivot(bar_index, low, false)
+            update_endpoint(bar_index, low)
+            cur_line := new_segment(bar_index, low, bar_index, high)
+            prev_pivot_bar := bar_index
+            prev_pivot_price := low
+            cur_pivot_bar := bar_index
+            cur_pivot_price := high
+            stn := "top"
+        else
+            confirm_pivot(cur_pivot_bar, cur_pivot_price, false)
+            confirm_pivot(bar_index, high, true)
+            cur_line := new_segment(cur_pivot_bar, cur_pivot_price, bar_index, high)
+            cur_line := new_segment(bar_index, high, bar_index, low)
+            prev_pivot_bar := bar_index
+            prev_pivot_price := high
+            cur_pivot_bar := bar_index
+            cur_pivot_price := low
+            stn := "bot"
+        HI := high
+        LO := low
+        outsidebar := false
+    else
+        outsidebar := true
+
+
+if barstate.isconfirmed and ev_live
+    if na(prev_pivot_bar) or prev_pivot_bar != ev_leg
+        ev_live := false
+    else
+        int xe0 = math.max(cross_x(ev_lvl, int(line.get_x2(ev_line)), ev_dir), ev_x1)
+        line.set_x2(ev_line, xe0)
+        label.set_x(ev_lbl, int(math.round((ev_x1 + xe0) / 2.0)))
+        if ev_fl >= 0
+            array.set(fl_x, ev_fl, xe0)
+
+if barstate.isconfirmed and stn != ""
+    int n = array.size(pv_bar)
+    string e_txt = ""
+    int e_x1 = 0
+    float e_lvl = na
+    color e_col = col_bos
+    int e_dir = 0
+
+    int   c_dir = 0
+    float c_lvl = na
+    int   c_x1 = 0
+    float c_key = na
+    int   c_keybar = 0
+    if stn == "top"
+        int li = find_idx(pv_isHigh, n - 1, false)            
+        if li >= 1
+            int hi_i = find_idx(pv_isHigh, li - 1, true)  
+            if hi_i >= 0
+                float lvl = array.get(pv_price, hi_i)
+                int leg = array.get(pv_bar, li)
+                if bull_bms(lvl) and leg != last_leg_bar
+                    c_dir := 1
+                    c_lvl := lvl
+                    c_x1 := array.get(pv_bar, hi_i)
+                    c_key := array.get(pv_price, li)
+                    c_keybar := leg
+    else if stn == "bot"
+        int hj = find_idx(pv_isHigh, n - 1, true)            
+        if hj >= 1
+            int lj = find_idx(pv_isHigh, hj - 1, false)       
+            if lj >= 0
+                float lvl2 = array.get(pv_price, lj)
+                int leg2 = array.get(pv_bar, hj)
+                if bear_bms(lvl2) and leg2 != last_leg_bar
+                    c_dir := -1
+                    c_lvl := lvl2
+                    c_x1 := array.get(pv_bar, lj)
+                    c_key := array.get(pv_price, hj)
+                    c_keybar := leg2
+
+    bool key_hit = not na(key_price) and ((trend == 1 and bear_break(key_price)) or (trend == -1 and bull_break(key_price)))
+    bool bms_ok = c_dir != 0 and (trend == 0 or c_dir == trend)   
+
+    if key_hit
+        e_txt := "CHoCH"
+        e_x1 := key_bar
+        e_lvl := key_price
+        e_col := col_choch
+        e_dir := -trend
+        int kn = find_idx(pv_isHigh, n - 1, trend == 1)  
+        trend := -trend
+        key_price := na                                   
+        if kn >= 0
+            last_leg_bar := array.get(pv_bar, kn)         
+    else if bms_ok
+        e_txt := "BMS"
+        e_x1 := c_x1
+        e_lvl := c_lvl
+        e_col := col_bos
+        e_dir := c_dir
+        trend := c_dir
+        key_price := c_key
+        key_bar := c_keybar
+        last_leg_bar := c_keybar
+
+    if e_txt != ""
+        int xe = math.max(cross_x(e_lvl, bar_index, e_dir), e_x1)
+        ev_line := new_ev_line(e_x1, xe, e_lvl, e_col)
+        int xm = int(math.round((e_x1 + xe) / 2.0))
+        int tr_at = nz(trend[bar_index - xm])                
+        color lbl_bg = chart.bg_color
+        if show_bg and tr_at != 0
+            lbl_bg := blend(chart.bg_color, tr_at == 1 ? col_bull : col_bear, (100 - bg_transp) / 100.0)
+        ev_lbl := new_ev_label(e_x1, xe, e_lvl, e_txt, e_col, lbl_bg)
+        ev_x1 := e_x1
+        ev_lvl := e_lvl
+        ev_dir := e_dir
+        ev_leg := prev_pivot_bar
+        ev_live := not na(prev_pivot_bar)
+        array.push(fl_x, xe)
+        array.push(fl_t, trend)
+        ev_fl := array.size(fl_x) - 1
+
+if mode_input == "reset on outside bar" and outsidebar and not na(HI)
+    if not na(cur_pivot_bar)
+        confirm_pivot(cur_pivot_bar, cur_pivot_price, stn == "top")   
+    stn := ""
+    HI := high
+    LO := low
+    init_bar := bar_index
+    init_open := open
+    init_high := high
+    init_low := low
+    prev_pivot_bar := na
+    prev_pivot_price := na
+    cur_pivot_bar := na
+    cur_pivot_price := na
+    cur_line := na
+    outsidebar := false
+
+LAG = 4
+vis_tr = trend_at(bar_index - LAG)
+vis_col = not show_bg ? na : vis_tr == 1 ? color.new(col_bull, bg_transp) : vis_tr == -1 ? color.new(col_bear, bg_transp) : na
+cur_col = not show_bg ? na : trend == 1 ? color.new(col_bull, bg_transp) : trend == -1 ? color.new(col_bear, bg_transp) : na
+bgcolor(vis_col, offset = -LAG, title = "trend background")
+bgcolor(cur_col, show_last = LAG, title = "trend background (latest bars)")
+plot(show_key ? key_price : na, "key level", color = color.new(color.gray, 30), style = plot.style_linebr)
