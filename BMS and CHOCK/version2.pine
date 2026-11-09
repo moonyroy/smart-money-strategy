@@ -1,0 +1,282 @@
+//@version=6
+indicator("ZigZag (LuxAlgo swings) + BMS / CHOCK", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+len = input.int(50, "Swing Detection Period", minval = 2, maxval = 4999)
+zzColor = input.color(color.white, "ZigZag Color")
+zzWidth = input.int(1, "ZigZag Line Width", minval = 1, maxval = 5)
+showLive = input.bool(true, "Show Live Leg")
+breakMode = input.string("Close", "Break Confirmation", options = ["Close", "Wick"])
+waitForBody = input.bool(true, "Wick Mode: Wait for Body Close (BMS only)")
+useFirstBmsFilter = input.bool(true, "Require Three Closes for First BMS")
+showTrendBackground = input.bool(true, "Show Trend Background")
+trendTransparency = input.int(90, "Trend Background Transparency", minval = 0, maxval = 100)
+
+color lightBlue = color.rgb(100, 200, 255)
+color pink = color.rgb(255, 105, 180)
+
+swings(int period) =>
+    var int os = 0
+    upper = ta.highest(period)
+    lower = ta.lowest(period)
+    os := high[period] > upper ? 0 : low[period] < lower ? 1 : os[1]
+    top = os == 0 and os[1] != 0 ? high[period] : na
+    bottom = os == 1 and os[1] != 1 ? low[period] : na
+    [top, bottom, os]
+
+[top, bottom, os] = swings(len)
+
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+max_bars_back(close, 5000)
+
+type Correction
+    float threshold = na
+    int closeCount = 0
+
+method observe(Correction correction, float candleClose, float wick, bool upward) =>
+    if not na(correction.threshold) and correction.closeCount < 3
+        bool closedBeyond = upward ? candleClose > correction.threshold : candleClose < correction.threshold
+        bool wickedBeyond = upward ? wick > correction.threshold : wick < correction.threshold
+        if closedBeyond
+            correction.closeCount += 1
+        else if wickedBeyond
+            correction.threshold := wick
+    correction.closeCount
+
+correctionFromPivot(bool upward, int period) =>
+    Correction correction = Correction.new(upward ? high[period] : low[period])
+    for step = 1 to period - 1
+        int offset = period - step
+        correction.observe(close[offset], upward ? high[offset] : low[offset], upward)
+        if correction.closeCount == 3
+            break
+    correction
+
+var float lastPrice = na
+var int lastTime = na
+var line liveLine = na
+
+var float swingHigh = na
+var int swingHighTime = na
+var int swingHighBar = na
+var float swingLow = na
+var int swingLowTime = na
+var int swingLowBar = na
+
+var float originHigh = na
+var int originHighTime = na
+var int originHighBar = na
+var float originLow = na
+var int originLowTime = na
+var int originLowBar = na
+var float windowHigh = na
+var int windowHighTime = na
+var int windowHighBar = na
+var float windowLow = na
+var int windowLowTime = na
+var int windowLowBar = na
+
+var int direction = 0
+var int nextReferenceFrom = 0
+var float protectedPrice = na
+var int protectedTime = na
+var int protectedBar = na
+var int waveStartBar = na
+var int waveBreakBar = na
+var bool waveUsesExtreme = false
+var bool waveHasOrigin = false
+var bool awaitingFirstBms = true
+var Correction highCorrection = Correction.new()
+var Correction lowCorrection = Correction.new()
+
+
+var int pendDir = 0
+var float pendLevel = na
+var float pendLinePrice = na   
+var int pendStartTime = na
+var int pendStartBar = na
+var line pendLine = na
+
+float breakHigh = breakMode == "Wick" ? high : close
+float breakLow = breakMode == "Wick" ? low : close
+bool useBodyWait = waitForBody and breakMode == "Wick"
+
+if barstate.isconfirmed
+    bool filterActive = useFirstBmsFilter and awaitingFirstBms
+    bool useWindowReference = direction != 0
+    if not na(top) or not na(bottom)
+        float pivotPrice = not na(top) ? top : bottom
+        int pivotTime = time[len]
+        int pivotBar = bar_index - len
+
+        if not na(lastPrice)
+            line.new(lastTime, lastPrice, pivotTime, pivotPrice, xloc = xloc.bar_time, color = zzColor, width = zzWidth)
+        lastPrice := pivotPrice
+        lastTime := pivotTime
+
+        if not na(top)
+            originHigh := top
+            originHighTime := pivotTime
+            originHighBar := pivotBar
+        else
+            originLow := bottom
+            originLowTime := pivotTime
+            originLowBar := pivotBar
+
+        bool isProtectedSide = (direction == 1 and not na(bottom)) or (direction == -1 and not na(top))
+        bool improvesProtection = not waveUsesExtreme or not waveHasOrigin or (direction == 1 ? pivotPrice < protectedPrice : pivotPrice > protectedPrice)
+        if isProtectedSide and improvesProtection and not na(waveStartBar) and pivotBar > waveStartBar and pivotBar < waveBreakBar
+            protectedPrice := pivotPrice
+            protectedTime := pivotTime
+            protectedBar := pivotBar
+            waveHasOrigin := true
+
+        if pivotBar >= nextReferenceFrom
+            if not na(top)
+                bool newWindowHigh = na(windowHigh) or top > windowHigh
+                if newWindowHigh
+                    windowHigh := top
+                    windowHighTime := pivotTime
+                    windowHighBar := pivotBar
+                swingHigh := top
+                swingHighTime := pivotTime
+                swingHighBar := pivotBar
+                if filterActive and direction >= 0 and (not useWindowReference or newWindowHigh)
+                    highCorrection := correctionFromPivot(false, len)
+            else
+                bool newWindowLow = na(windowLow) or bottom < windowLow
+                if newWindowLow
+                    windowLow := bottom
+                    windowLowTime := pivotTime
+                    windowLowBar := pivotBar
+                swingLow := bottom
+                swingLowTime := pivotTime
+                swingLowBar := pivotBar
+                if filterActive and direction <= 0 and (not useWindowReference or newWindowLow)
+                    lowCorrection := correctionFromPivot(true, len)
+
+    if not na(originHigh) and breakHigh >= originHigh
+        originHigh := na
+    if not na(originLow) and breakLow <= originLow
+        originLow := na
+
+    bool highReady = not filterActive or highCorrection.closeCount == 3
+    bool lowReady = not filterActive or lowCorrection.closeCount == 3
+    float bmsHigh = useWindowReference ? windowHigh : swingHigh
+    float bmsLow = useWindowReference ? windowLow : swingLow
+    int bmsHighBar = useWindowReference ? windowHighBar : swingHighBar
+    int bmsLowBar = useWindowReference ? windowLowBar : swingLowBar
+    int bmsHighTime = useWindowReference ? windowHighTime : swingHighTime
+    int bmsLowTime = useWindowReference ? windowLowTime : swingLowTime
+    bool highBroken = highReady and direction >= 0 and not na(bmsHigh) and breakHigh >= bmsHigh
+    bool lowBroken = lowReady and direction <= 0 and not na(bmsLow) and breakLow <= bmsLow
+    bool bearishChange = direction == 1 and not na(protectedPrice) and breakLow <= protectedPrice
+    bool bullishChange = direction == -1 and not na(protectedPrice) and breakHigh >= protectedPrice
+    bool isChange = bearishChange or bullishChange
+
+    if filterActive
+        highCorrection.observe(close, low, false)
+        lowCorrection.observe(close, high, true)
+
+    bool pendingConfirmed = false
+    if pendDir != 0
+        bool oppositeBreak = pendDir == 1 ? lowBroken : highBroken
+        if isChange or oppositeBreak or not useBodyWait
+            line.delete(pendLine)
+            pendDir := 0
+        else
+            bool bodyBroke = pendDir == 1 ? close >= pendLevel : close <= pendLevel
+            if bodyBroke
+                pendingConfirmed := true
+            else
+                if pendDir == 1 and high > pendLevel
+                    pendLevel := high
+                else if pendDir == -1 and low < pendLevel
+                    pendLevel := low
+                line.set_xy2(pendLine, time, pendLinePrice)
+
+    int eventDirection = 0
+    if pendingConfirmed
+        eventDirection := pendDir
+    else if pendDir == 0
+        if isChange
+            eventDirection := -direction
+        else if highBroken != lowBroken
+            int breakDir = highBroken ? 1 : -1
+            bool bodyOk = not useBodyWait or (breakDir == 1 ? close >= bmsHigh : close <= bmsLow)
+            if bodyOk
+                eventDirection := breakDir
+            else
+                pendDir := breakDir
+                pendLevel := breakDir == 1 ? high : low
+                pendLinePrice := breakDir == 1 ? bmsHigh : bmsLow
+                pendStartBar := breakDir == 1 ? bmsHighBar : bmsLowBar
+                pendStartTime := breakDir == 1 ? bmsHighTime : bmsLowTime
+                pendLine := line.new(pendStartTime, pendLinePrice, time, pendLinePrice, xloc = xloc.bar_time, color = lightBlue, style = line.style_dotted)
+
+    if eventDirection != 0
+        bool bullish = eventDirection == 1
+        int bmsTime = bullish ? bmsHighTime : bmsLowTime
+        int bmsBar = bullish ? bmsHighBar : bmsLowBar
+        float levelPrice = pendingConfirmed ? pendLinePrice : (isChange ? protectedPrice : (bullish ? bmsHigh : bmsLow))
+        int levelTime = pendingConfirmed ? pendStartTime : (isChange ? protectedTime : bmsTime)
+        int levelBar = pendingConfirmed ? pendStartBar : (isChange ? protectedBar : bmsBar)
+        color eventColor = isChange ? pink : lightBlue
+
+        if pendingConfirmed
+            line.delete(pendLine)
+            pendDir := 0
+
+        int spanBars = bar_index - levelBar
+        bool useBarIndex = spanBars >= 8 and spanBars <= 9999
+        string drawingXloc = useBarIndex ? xloc.bar_index : xloc.bar_time
+        int startX = useBarIndex ? levelBar : levelTime
+        int endX = useBarIndex ? bar_index : time
+        int spanX = endX - startX
+        int centerX = startX + int(spanX * 0.5)
+        int halfGap = math.max(1, int(spanX * 0.05))
+
+        line.new(startX, levelPrice, centerX - halfGap, levelPrice, xloc = drawingXloc, color = eventColor)
+        line.new(centerX + halfGap, levelPrice, endX, levelPrice, xloc = drawingXloc, color = eventColor)
+        label.new(centerX, levelPrice, isChange ? "CHOCK" : "BMS", xloc = drawingXloc, yloc = yloc.price, style = label.style_label_center, color = color.new(eventColor, 100), textcolor = eventColor, size = size.small)
+
+        float originPrice = bullish ? originLow : originHigh
+        int originTime = bullish ? originLowTime : originHighTime
+        int originBar = bullish ? originLowBar : originHighBar
+        bool useIntervalExtreme = not isChange and direction != 0
+        if useIntervalExtreme
+            originPrice := bullish ? windowLow : windowHigh
+            originTime := bullish ? windowLowTime : windowHighTime
+            originBar := bullish ? windowLowBar : windowHighBar
+        waveStartBar := useIntervalExtreme ? nextReferenceFrom - 1 : levelBar
+        waveHasOrigin := not na(originPrice) and originBar > waveStartBar and originBar < bar_index
+        if waveHasOrigin
+            protectedPrice := originPrice
+            protectedTime := originTime
+            protectedBar := originBar
+        else if isChange
+            protectedPrice := na
+            protectedTime := na
+            protectedBar := na
+
+        direction := eventDirection
+        waveBreakBar := bar_index
+        waveUsesExtreme := useIntervalExtreme
+        nextReferenceFrom := bar_index
+        swingHigh := na
+        swingLow := na
+        windowHigh := na
+        windowLow := na
+        windowHighBar := na
+        windowLowBar := na
+        awaitingFirstBms := isChange
+        highCorrection := Correction.new()
+        lowCorrection := Correction.new()
+
+color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
+bgcolor(showTrendBackground ? color.new(trendColor, trendTransparency) : na, title = "Trend Background")
+
+if showLive and barstate.islast and not na(lastPrice)
+    line.delete(liveLine)
+    float livePrice = os == 1 ? high : low
+    liveLine := line.new(lastTime, lastPrice, time, livePrice, xloc = xloc.bar_time, color = zzColor, width = zzWidth, style = line.style_dashed)
