@@ -1,0 +1,310 @@
+//@version=6
+indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+len = input.int(20, "Swing Detection Period", minval = 2, maxval = 4999, tooltip = "Structure events appear this many bars after the break and are drawn on the original break bar.")
+const color zzColor = color.white
+const int zzWidth = 1
+
+color lightBlue = color.rgb(100, 200, 255)
+color pink = color.rgb(255, 105, 180)
+
+swings(int period) =>
+    var int os = 0
+    upper = ta.highest(period)
+    lower = ta.lowest(period)
+    os := high[period] > upper ? 0 : low[period] < lower ? 1 : os[1]
+    top = os == 0 and os[1] != 0 ? high[period] : na
+    bottom = os == 1 and os[1] != 1 ? low[period] : na
+    [top, bottom, os]
+
+[top, bottom, os] = swings(len)
+
+max_bars_back(high, 5000)
+max_bars_back(low, 5000)
+max_bars_back(close, 5000)
+max_bars_back(time, 5000)
+
+type Correction
+    float threshold = na
+    int closeCount = 0
+
+method observe(Correction correction, float candleClose, float wick, bool upward) =>
+    if not na(correction.threshold) and correction.closeCount < 3
+        bool closedBeyond = upward ? candleClose > correction.threshold : candleClose < correction.threshold
+        bool wickedBeyond = upward ? wick > correction.threshold : wick < correction.threshold
+        if closedBeyond
+            correction.closeCount += 1
+        else if wickedBeyond
+            correction.threshold := wick
+    correction.closeCount
+
+
+var array<float> loP = array.new<float>()
+var array<int> loT = array.new<int>()
+var array<int> loB = array.new<int>()
+var array<float> hiP = array.new<float>()
+var array<int> hiT = array.new<int>()
+var array<int> hiB = array.new<int>()
+
+pushPivot(array<float> prices, array<int> times, array<int> bars, float price, int tm, int bi) =>
+    prices.push(price)
+    times.push(tm)
+    bars.push(bi)
+    if prices.size() > 300
+        prices.shift()
+        times.shift()
+        bars.shift()
+
+
+pickProtected(bool lowSide, int fromBar, int toBar) =>
+    array<float> p = loP
+    array<int> t = loT
+    array<int> b = loB
+    if not lowSide
+        p := hiP
+        t := hiT
+        b := hiB
+    float rp = na
+    int rt = na
+    int rb = na
+    int sz = p.size()
+    if sz > 0
+        for i = 0 to sz - 1
+            int pb = b.get(i)
+            if pb > fromBar and pb < toBar
+                float pp = p.get(i)
+                bool take = na(rp) or (lowSide ? pp < rp : pp > rp)
+                if take
+                    rp := pp
+                    rt := t.get(i)
+                    rb := pb
+    [rp, rt, rb]
+
+var float lastPrice = na
+var int lastTime = na
+var line liveLine = na
+
+var float swingHigh = na
+var int swingHighTime = na
+var int swingHighBar = na
+var float swingLow = na
+var int swingLowTime = na
+var int swingLowBar = na
+var float previousSwingHigh = na
+var float previousSwingLow = na
+
+var float windowHigh = na
+var int windowHighTime = na
+var int windowHighBar = na
+var float windowLow = na
+var int windowLowTime = na
+var int windowLowBar = na
+
+var float lowSinceWindowHigh = na
+var int lowSinceWindowHighTime = na
+var int lowSinceWindowHighBar = na
+var float highSinceWindowLow = na
+var int highSinceWindowLowTime = na
+var int highSinceWindowLowBar = na
+
+var int direction = 0
+var int nextReferenceFrom = 0
+var float protectedPrice = na
+var int protectedTime = na
+var int protectedBar = na
+var bool awaitingFirstBms = true
+var Correction highCorrection = Correction.new()
+var Correction lowCorrection = Correction.new()
+
+type BmsBreak
+    float wickLevel = na
+    float referencePrice = na
+    int referenceTime = na
+    int referenceBar = na
+
+method confirm(BmsBreak bms, bool upward, bool crossed, bool correctionReady, float wick, float candleClose, float referencePrice, int referenceTime, int referenceBar) =>
+    bool confirmed = false
+    if not na(bms.wickLevel)
+        confirmed := correctionReady and (upward ? candleClose > bms.wickLevel : candleClose < bms.wickLevel)
+        if not confirmed
+            bms.wickLevel := upward ? math.max(bms.wickLevel, wick) : math.min(bms.wickLevel, wick)
+    else if crossed and correctionReady
+        bms.referencePrice := referencePrice
+        bms.referenceTime := referenceTime
+        bms.referenceBar := referenceBar
+        confirmed := upward ? candleClose > referencePrice : candleClose < referencePrice
+        if not confirmed
+            bms.wickLevel := wick
+    confirmed
+
+var BmsBreak bullishBms = BmsBreak.new()
+var BmsBreak bearishBms = BmsBreak.new()
+
+if barstate.isconfirmed and (not na(top) or not na(bottom))
+    float pivotPrice = not na(top) ? top : bottom
+    int pivotTime = time[len]
+    if not na(lastPrice)
+        line.new(lastTime, lastPrice, pivotTime, pivotPrice, xloc = xloc.bar_time, color = zzColor, width = zzWidth)
+    lastPrice := pivotPrice
+    lastTime := pivotTime
+
+if barstate.isconfirmed and bar_index >= len
+    int structureBar = bar_index - len
+    int structureTime = time[len]
+    float structureHigh = high[len]
+    float structureLow = low[len]
+    float structureClose = close[len]
+    bool filterActive = awaitingFirstBms
+    bool useWindowReference = direction != 0
+
+    float pivotHigh = top[1]
+    float pivotLow = bottom[1]
+    if not na(pivotHigh) or not na(pivotLow)
+        int pivotTime = time[len + 1]
+        int pivotBar = structureBar - 1
+        if not na(pivotHigh)
+            pushPivot(hiP, hiT, hiB, pivotHigh, pivotTime, pivotBar)
+        else
+            pushPivot(loP, loT, loB, pivotLow, pivotTime, pivotBar)
+
+        if pivotBar >= nextReferenceFrom
+            if not na(pivotHigh)
+                bool newWindowHigh = na(windowHigh) or (direction != 1 and pivotHigh > windowHigh)
+                if newWindowHigh
+                    windowHigh := pivotHigh
+                    windowHighTime := pivotTime
+                    windowHighBar := pivotBar
+                    lowSinceWindowHigh := na
+                swingHigh := pivotHigh
+                swingHighTime := pivotTime
+                swingHighBar := pivotBar
+                previousSwingHigh := hiP.size() > 1 ? hiP.get(hiP.size() - 2) : na
+                if filterActive and direction >= 0 and na(bullishBms.wickLevel) and (not useWindowReference or newWindowHigh)
+                    highCorrection := Correction.new(pivotHigh)
+            else
+                bool newWindowLow = na(windowLow) or (direction != -1 and pivotLow < windowLow)
+                if newWindowLow
+                    windowLow := pivotLow
+                    windowLowTime := pivotTime
+                    windowLowBar := pivotBar
+                    highSinceWindowLow := na
+                swingLow := pivotLow
+                swingLowTime := pivotTime
+                swingLowBar := pivotBar
+                previousSwingLow := loP.size() > 1 ? loP.get(loP.size() - 2) : na
+                if filterActive and direction <= 0 and na(bearishBms.wickLevel) and (not useWindowReference or newWindowLow)
+                    lowCorrection := Correction.new(pivotLow)
+
+    bool highReady = not filterActive or highCorrection.closeCount == 3
+    bool lowReady = not filterActive or lowCorrection.closeCount == 3
+    float bmsHigh = useWindowReference ? windowHigh : swingHigh
+    float bmsLow = useWindowReference ? windowLow : swingLow
+    int bmsHighBar = useWindowReference ? windowHighBar : swingHighBar
+    int bmsLowBar = useWindowReference ? windowLowBar : swingLowBar
+    int bmsHighTime = useWindowReference ? windowHighTime : swingHighTime
+    int bmsLowTime = useWindowReference ? windowLowTime : swingLowTime
+    // Use the prior same-side pivot as a fallback until a protected level is available.
+    float highPullbackReference = na(protectedPrice) ? previousSwingHigh : protectedPrice
+    float lowPullbackReference = na(protectedPrice) ? previousSwingLow : protectedPrice
+    bool hasLowerHigh = not na(swingHigh) and not na(bmsLowBar) and swingHighBar > bmsLowBar and not na(highPullbackReference) and swingHigh < highPullbackReference
+    bool hasHigherLow = not na(swingLow) and not na(bmsHighBar) and swingLowBar > bmsHighBar and not na(lowPullbackReference) and swingLow > lowPullbackReference
+
+    bool bullishContinuation = direction == 1 and hasHigherLow and structureHigh > bmsHigh
+    bool bearishContinuation = direction == -1 and hasLowerHigh and structureLow < bmsLow
+    bool highBroken = not na(bmsHigh) and (direction == 0 ? structureHigh > bmsHigh : bullishContinuation)
+    bool lowBroken = not na(bmsLow) and (direction == 0 ? structureLow < bmsLow : bearishContinuation)
+    bool bearishChange = direction == 1 and not na(protectedPrice) and structureLow <= protectedPrice
+    bool bullishChange = direction == -1 and not na(protectedPrice) and structureHigh >= protectedPrice
+    bool isChange = bearishChange or bullishChange
+
+    if filterActive
+        highCorrection.observe(structureClose, structureLow, false)
+        lowCorrection.observe(structureClose, structureHigh, true)
+
+    int eventDirection = 0
+    if isChange
+        eventDirection := -direction
+    else
+        bool bullishConfirmed = bullishBms.confirm(true, highBroken, highReady, structureHigh, structureClose, bmsHigh, bmsHighTime, bmsHighBar)
+        bool bearishConfirmed = bearishBms.confirm(false, lowBroken, lowReady, structureLow, structureClose, bmsLow, bmsLowTime, bmsLowBar)
+        if bullishConfirmed != bearishConfirmed
+            eventDirection := bullishConfirmed ? 1 : -1
+
+    if eventDirection != 0
+        bool bullish = eventDirection == 1
+        BmsBreak bms = bullish ? bullishBms : bearishBms
+        float levelPrice = isChange ? protectedPrice : bms.referencePrice
+        int levelTime = isChange ? protectedTime : bms.referenceTime
+        int levelBar = isChange ? protectedBar : bms.referenceBar
+        color eventColor = isChange ? pink : lightBlue
+
+        int spanBars = bar_index - levelBar
+        bool useBarIndex = structureBar - levelBar >= 8 and spanBars <= 9999
+        string drawingXloc = useBarIndex ? xloc.bar_index : xloc.bar_time
+        int startX = useBarIndex ? levelBar : levelTime
+        int endX = useBarIndex ? structureBar : structureTime
+        int spanX = endX - startX
+        int centerX = startX + int(spanX * 0.5)
+        int halfGap = math.max(1, int(spanX * 0.05))
+
+        line.new(startX, levelPrice, centerX - halfGap, levelPrice, xloc = drawingXloc, color = eventColor)
+        line.new(centerX + halfGap, levelPrice, endX, levelPrice, xloc = drawingXloc, color = eventColor)
+        label.new(centerX, levelPrice, isChange ? "CHOCK" : "BMS", xloc = drawingXloc, yloc = yloc.price, style = label.style_label_center, color = color.new(eventColor, 100), textcolor = eventColor, size = size.small)
+
+        float originPrice = na
+        int originTime = na
+        int originBar = na
+        bool isContinuation = not isChange and useWindowReference
+        if isContinuation
+            originPrice := bullish ? lowSinceWindowHigh : highSinceWindowLow
+            originTime := bullish ? lowSinceWindowHighTime : highSinceWindowLowTime
+            originBar := bullish ? lowSinceWindowHighBar : highSinceWindowLowBar
+        else
+            [pickPrice, pickTime, pickBar] = pickProtected(bullish, levelBar, structureBar)
+            originPrice := pickPrice
+            originTime := pickTime
+            originBar := pickBar
+        bool hasOrigin = not na(originPrice) and originBar > levelBar and originBar < structureBar
+        if hasOrigin
+            protectedPrice := originPrice
+            protectedTime := originTime
+            protectedBar := originBar
+        else if isChange
+            protectedPrice := na
+            protectedTime := na
+            protectedBar := na
+
+        direction := eventDirection
+        nextReferenceFrom := structureBar
+        swingHigh := na
+        swingLow := na
+        previousSwingHigh := na
+        previousSwingLow := na
+        windowHigh := na
+        windowLow := na
+        windowHighBar := na
+        windowLowBar := na
+        lowSinceWindowHigh := na
+        highSinceWindowLow := na
+        awaitingFirstBms := isChange
+        highCorrection := Correction.new()
+        lowCorrection := Correction.new()
+        bullishBms := BmsBreak.new()
+        bearishBms := BmsBreak.new()
+    else
+        if not na(windowHigh) and (na(lowSinceWindowHigh) or structureLow < lowSinceWindowHigh)
+            lowSinceWindowHigh := structureLow
+            lowSinceWindowHighTime := structureTime
+            lowSinceWindowHighBar := structureBar
+        if not na(windowLow) and (na(highSinceWindowLow) or structureHigh > highSinceWindowLow)
+            highSinceWindowLow := structureHigh
+            highSinceWindowLowTime := structureTime
+            highSinceWindowLowBar := structureBar
+
+color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
+bgcolor(color.new(trendColor, 90), offset = -len, title = "Trend Background")
+
+if barstate.islast and not na(lastPrice)
+    line.delete(liveLine)
+    float livePrice = os == 1 ? high : low
+    liveLine := line.new(lastTime, lastPrice, time, livePrice, xloc = xloc.bar_time, color = zzColor, width = zzWidth, style = line.style_dashed)
