@@ -1,5 +1,5 @@
 //@version=6
-indicator("🐰🍭❤️", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500)
 
 len = input.int(20, "Swing Detection Period", minval = 2, maxval = 4999, tooltip = "Structure events appear this many bars after the break and are drawn on the original break bar.")
 const color zzColor = color.white
@@ -38,7 +38,9 @@ method observe(Correction correction, float candleClose, float wick, bool upward
             correction.threshold := wick
     correction.closeCount
 
-
+// ---------------------------------------------------------------------------
+// Pivot history (used to pick the protected level)
+// ---------------------------------------------------------------------------
 var array<float> loP = array.new<float>()
 var array<int> loT = array.new<int>()
 var array<int> loB = array.new<int>()
@@ -55,6 +57,9 @@ pushPivot(array<float> prices, array<int> times, array<int> bars, float price, i
         times.shift()
         bars.shift()
 
+// Picks the protected pivot between fromBar and toBar (both exclusive).
+// lowSide = true  -> pivot lows  (protected low of a bullish wave)
+// lowSide = false -> pivot highs (protected high of a bearish wave)
 pickProtected(bool lowSide, int fromBar, int toBar) =>
     array<float> p = loP
     array<int> t = loT
@@ -107,8 +112,6 @@ var int highSinceWindowLowTime = na
 var int highSinceWindowLowBar = na
 
 var int direction = 0
-var float trendHigh = na   
-var float trendLow = na    
 var int nextReferenceFrom = 0
 var float protectedPrice = na
 var int protectedTime = na
@@ -123,13 +126,14 @@ type BmsBreak
     int referenceTime = na
     int referenceBar = na
 
-method confirm(BmsBreak bms, bool upward, bool crossed, float wick, float candleClose, float referencePrice, int referenceTime, int referenceBar) =>
+method confirm(BmsBreak bms, bool upward, bool crossed, bool correctionReady, float wick, float candleClose, float referencePrice, int referenceTime, int referenceBar) =>
     bool confirmed = false
     if not na(bms.wickLevel)
-        confirmed := upward ? candleClose > bms.wickLevel : candleClose < bms.wickLevel
+        // Check the close against the previous wick before extending the level with this candle.
+        confirmed := correctionReady and (upward ? candleClose > bms.wickLevel : candleClose < bms.wickLevel)
         if not confirmed
             bms.wickLevel := upward ? math.max(bms.wickLevel, wick) : math.min(bms.wickLevel, wick)
-    else if crossed
+    else if crossed and correctionReady
         bms.referencePrice := referencePrice
         bms.referenceTime := referenceTime
         bms.referenceBar := referenceBar
@@ -149,6 +153,7 @@ if barstate.isconfirmed and (not na(top) or not na(bottom))
     lastPrice := pivotPrice
     lastTime := pivotTime
 
+// Process structure in source-bar order once all preceding pivots are known.
 if barstate.isconfirmed and bar_index >= len
     int structureBar = bar_index - len
     int structureTime = time[len]
@@ -158,6 +163,7 @@ if barstate.isconfirmed and bar_index >= len
     bool filterActive = awaitingFirstBms
     bool useWindowReference = direction != 0
 
+    // A pivot on the break candle itself can only become a reference on the next candle.
     float pivotHigh = top[1]
     float pivotLow = bottom[1]
     if not na(pivotHigh) or not na(pivotLow)
@@ -181,7 +187,7 @@ if barstate.isconfirmed and bar_index >= len
                 swingHighTime := pivotTime
                 swingHighBar := pivotBar
                 previousSwingHigh := hiP.size() > 1 ? hiP.get(hiP.size() - 2) : na
-                if filterActive and direction >= 0 and (not useWindowReference or newWindowHigh)
+                if filterActive and direction >= 0 and na(bullishBms.wickLevel) and (not useWindowReference or newWindowHigh)
                     highCorrection := Correction.new(pivotHigh)
             else
                 // Keep the bearish break reference until the next structure event.
@@ -195,7 +201,7 @@ if barstate.isconfirmed and bar_index >= len
                 swingLowTime := pivotTime
                 swingLowBar := pivotBar
                 previousSwingLow := loP.size() > 1 ? loP.get(loP.size() - 2) : na
-                if filterActive and direction <= 0 and (not useWindowReference or newWindowLow)
+                if filterActive and direction <= 0 and na(bearishBms.wickLevel) and (not useWindowReference or newWindowLow)
                     lowCorrection := Correction.new(pivotLow)
 
     bool highReady = not filterActive or highCorrection.closeCount == 3
@@ -213,10 +219,10 @@ if barstate.isconfirmed and bar_index >= len
     bool hasHigherLow = not na(swingLow) and not na(bmsHighBar) and swingLowBar > bmsHighBar and not na(lowPullbackReference) and swingLow > lowPullbackReference
 
     // A wick beyond the level starts a candidate; only a close can confirm it.
-    bool bullishContinuation = direction == 1 and hasHigherLow and structureHigh > bmsHigh and (na(trendHigh) or structureHigh > trendHigh)
-    bool bearishContinuation = direction == -1 and hasLowerHigh and structureLow < bmsLow and (na(trendLow) or structureLow < trendLow)
-    bool highBroken = highReady and not na(bmsHigh) and (direction == 0 ? structureHigh > bmsHigh : bullishContinuation)
-    bool lowBroken = lowReady and not na(bmsLow) and (direction == 0 ? structureLow < bmsLow : bearishContinuation)
+    bool bullishContinuation = direction == 1 and hasHigherLow and structureHigh > bmsHigh
+    bool bearishContinuation = direction == -1 and hasLowerHigh and structureLow < bmsLow
+    bool highBroken = not na(bmsHigh) and (direction == 0 ? structureHigh > bmsHigh : bullishContinuation)
+    bool lowBroken = not na(bmsLow) and (direction == 0 ? structureLow < bmsLow : bearishContinuation)
     bool bearishChange = direction == 1 and not na(protectedPrice) and structureLow <= protectedPrice
     bool bullishChange = direction == -1 and not na(protectedPrice) and structureHigh >= protectedPrice
     bool isChange = bearishChange or bullishChange
@@ -229,12 +235,10 @@ if barstate.isconfirmed and bar_index >= len
     if isChange
         eventDirection := -direction
     else
-        bool bullishConfirmed = bullishBms.confirm(true, highBroken, structureHigh, structureClose, bmsHigh, bmsHighTime, bmsHighBar)
-        bool bearishConfirmed = bearishBms.confirm(false, lowBroken, structureLow, structureClose, bmsLow, bmsLowTime, bmsLowBar)
+        bool bullishConfirmed = bullishBms.confirm(true, highBroken, highReady, structureHigh, structureClose, bmsHigh, bmsHighTime, bmsHighBar)
+        bool bearishConfirmed = bearishBms.confirm(false, lowBroken, lowReady, structureLow, structureClose, bmsLow, bmsLowTime, bmsLowBar)
         if bullishConfirmed != bearishConfirmed
             eventDirection := bullishConfirmed ? 1 : -1
-
-    bool resetTrend = eventDirection != 0 and (isChange or direction == 0)
 
     if eventDirection != 0
         bool bullish = eventDirection == 1
@@ -298,6 +302,7 @@ if barstate.isconfirmed and bar_index >= len
         bullishBms := BmsBreak.new()
         bearishBms := BmsBreak.new()
     else
+        // Update after event detection so the breaking candle cannot set its own protected level.
         if not na(windowHigh) and (na(lowSinceWindowHigh) or structureLow < lowSinceWindowHigh)
             lowSinceWindowHigh := structureLow
             lowSinceWindowHighTime := structureTime
@@ -306,14 +311,6 @@ if barstate.isconfirmed and bar_index >= len
             highSinceWindowLow := structureHigh
             highSinceWindowLowTime := structureTime
             highSinceWindowLowBar := structureBar
-
-    if direction != 0
-        if resetTrend or na(trendHigh) or na(trendLow)
-            trendHigh := structureHigh
-            trendLow := structureLow
-        else
-            trendHigh := math.max(trendHigh, structureHigh)
-            trendLow := math.min(trendLow, structureLow)
 
 color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
 bgcolor(color.new(trendColor, 90), offset = -len, title = "Trend Background")
