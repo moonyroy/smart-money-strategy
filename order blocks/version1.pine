@@ -1,0 +1,575 @@
+//@version=6
+indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+pivotPeriod = input.int(5, "Pivot Period", minval = 1, maxval = 4999, tooltip = "Structure uses finalized Zig Zag pivots. A signal is drawn on its original break candle once the required pivots are final.")
+closesRequired = input.int(3, "Required Correction Closes (all BMS)", minval = 1, maxval = 20, tooltip = "Number of candle closes in the correction direction required before a BMS can be confirmed. Applied to every BMS.")
+showBmsRange = input.bool(true, "Show BMS Order Block Search Zone")
+showOrderBlocks = input.bool(true, "Show FVG-Confirmed Order Blocks")
+showFvgBoxes = input.bool(false, "Show Order Block FVG Boxes")
+zoneRule = input.string("Mean Inside", "Order Block Zone Rule", options = ["Mean Inside", "Fully Inside"], tooltip = "Mean Inside: the midpoint of the order block must be inside the eligible half (below 50% for bullish, above 50% for bearish). Fully Inside: the whole order block must be inside it.")
+mitigationMode = input.string("Touch", "Order Block Mitigation", options = ["Touch", "Close Through"], tooltip = "Touch: the order block ends when a later candle reaches it. Close Through: it ends only when a later candle closes beyond its far side.")
+lineStyleStr = input.string("Solid", "Line Style", options = ["Solid", "Dotted", "Dashed"])
+lineColor = input.color(#2484bb, "Line Color")
+lineWidth = input.int(1, "Line Width", minval = 1)
+zigzagStyle = lineStyleStr == "Dotted" ? line.style_dotted : lineStyleStr == "Dashed" ? line.style_dashed : line.style_solid
+
+color lightBlue = color.rgb(100, 200, 255)
+color pink = color.rgb(255, 105, 180)
+
+max_bars_back(close, 5000)
+max_bars_back(time, 5000)
+const int maxDrawingOffset = 4999
+
+type ZigzagPivot
+    float price
+    int tm
+    int index
+    bool isHigh
+    float oppositeWick
+    string kind = ""
+
+type StructureCandle
+    int index
+    int tm
+    float highPrice
+    float lowPrice
+    float closePrice
+    float openPrice
+
+type OrderBlockCandidate
+    int index
+    int tm
+    float top
+    float bottom
+    bool bullish
+    int gapTime
+    float gapTop
+    float gapBottom
+    int confirmBar
+    bool mitigated = false
+    int mitigatedTime = na
+    box blockBox = na
+    box gapBox = na
+    bool displayed = false
+
+type BmsLeg
+    bool bullish
+    int breakBar
+    int originBar
+    float origin
+    float extreme
+    int rightTime
+    box searchZone
+    array<OrderBlockCandidate> candidates
+
+var array<OrderBlockCandidate> activeBlocks = array.new<OrderBlockCandidate>()
+
+method mitigate(OrderBlockCandidate block, int bar, int tm, float candleHigh, float candleLow, float candleClose) =>
+    if not block.mitigated and bar > block.confirmBar
+        bool closeMode = mitigationMode == "Close Through"
+        bool hit = block.bullish ? (closeMode ? candleClose < block.bottom : candleLow <= block.top) : (closeMode ? candleClose > block.top : candleHigh >= block.bottom)
+        if hit
+            block.mitigated := true
+            block.mitigatedTime := tm
+            if not na(block.blockBox)
+                box.set_right(block.blockBox, tm)
+                box.set_extend(block.blockBox, extend.none)
+    block.mitigated
+
+method accepts(BmsLeg leg, OrderBlockCandidate candidate) =>
+    bool onOriginSide = leg.bullish ? candidate.bottom >= leg.origin : candidate.top <= leg.origin
+    candidate.bullish == leg.bullish and candidate.index >= leg.originBar and onOriginSide
+
+method refresh(BmsLeg leg) =>
+    float midpoint = math.avg(leg.origin, leg.extreme)
+    float zoneTop = leg.bullish ? midpoint : leg.origin
+    float zoneBottom = leg.bullish ? leg.origin : midpoint
+    if not na(leg.searchZone)
+        box.set_top(leg.searchZone, zoneTop)
+        box.set_bottom(leg.searchZone, zoneBottom)
+        box.set_right(leg.searchZone, leg.rightTime)
+
+    bool meanRule = zoneRule == "Mean Inside"
+    for candidate in leg.candidates
+        float blockMean = math.avg(candidate.top, candidate.bottom)
+        bool fits = leg.bullish ? (meanRule ? blockMean <= zoneTop : candidate.top <= zoneTop) : (meanRule ? blockMean >= zoneBottom : candidate.bottom >= zoneBottom)
+        if fits
+            color blockColor = leg.bullish ? color.teal : pink
+            int rightTime = math.max(candidate.gapTime + 1, leg.rightTime)
+            if not candidate.displayed
+                if showOrderBlocks
+                    int blockRight = candidate.mitigated ? candidate.mitigatedTime : rightTime
+                    string blockExtend = candidate.mitigated ? extend.none : extend.right
+                    candidate.blockBox := box.new(candidate.tm, candidate.top, blockRight, candidate.bottom, xloc = xloc.bar_time, border_color = blockColor, bgcolor = color.new(blockColor, 80), extend = blockExtend)
+                    if not candidate.mitigated
+                        activeBlocks.push(candidate)
+                if showFvgBoxes
+                    candidate.gapBox := box.new(candidate.gapTime, candidate.gapTop, rightTime, candidate.gapBottom, xloc = xloc.bar_time, border_color = color.new(blockColor, 55), bgcolor = color.new(blockColor, 92))
+                candidate.displayed := true
+            else if not na(candidate.gapBox)
+                box.set_right(candidate.gapBox, rightTime)
+        else if candidate.displayed
+            if not na(candidate.blockBox)
+                box.delete(candidate.blockBox)
+                candidate.blockBox := na
+            if not na(candidate.gapBox)
+                box.delete(candidate.gapBox)
+                candidate.gapBox := na
+            candidate.displayed := false
+    midpoint
+
+selectZigzagPivot(ZigzagPivot tail, ZigzagPivot rawHigh, ZigzagPivot rawLow, bool hp, bool lp, float candleClose) =>
+    ZigzagPivot selected = na
+    bool replaceTail = false
+    if na(tail)
+        if hp != lp
+            selected := hp ? rawHigh : rawLow
+    else
+        float lastValue = tail.price
+        bool lastLow = tail.kind == "L" or tail.kind == "LL"
+        bool lastHigh = tail.kind == "H" or tail.kind == "HH"
+        bool lastLH = tail.kind == "LH"
+        bool lastHL = tail.kind == "HL"
+
+        if hp and lp
+            if lastLow
+                replaceTail := rawLow.price < lastValue
+                selected := replaceTail ? rawLow : rawHigh
+            else if lastHigh
+                replaceTail := rawHigh.price > lastValue
+                selected := replaceTail ? rawHigh : rawLow
+            else if lastLH
+                if rawHigh.price < lastValue
+                    selected := rawLow
+                else if rawHigh.price > lastValue
+                    if candleClose < lastValue
+                        replaceTail := true
+                        selected := rawHigh
+                    else if candleClose > lastValue
+                        selected := rawLow
+            else if lastHL
+                if rawLow.price > lastValue
+                    selected := rawHigh
+                else if rawLow.price < lastValue
+                    if candleClose > lastValue
+                        replaceTail := true
+                        selected := rawLow
+                    else if candleClose < lastValue
+                        selected := rawHigh
+        else if hp
+            if not tail.isHigh
+                if rawHigh.price > lastValue
+                    selected := rawHigh
+                else if rawHigh.price < lastValue
+                    replaceTail := true
+                    selected := rawLow
+            else if rawHigh.price > lastValue
+                replaceTail := true
+                selected := rawHigh
+        else if lp
+            if tail.isHigh
+                if rawLow.price < lastValue
+                    selected := rawLow
+                else if rawLow.price > lastValue
+                    replaceTail := true
+                    selected := rawHigh
+            else if rawLow.price < lastValue
+                replaceTail := true
+                selected := rawLow
+
+    [selected, replaceTail]
+
+appendZigzagPivot(array<ZigzagPivot> pivots, ZigzagPivot selected) =>
+    int cnt = pivots.size()
+    string kind = selected.isHigh ? "H" : "L"
+    if cnt > 2
+        ZigzagPivot previous = pivots.get(cnt - 2)
+        if selected.isHigh
+            kind := previous.price < selected.price ? "HH" : "LH"
+        else
+            kind := previous.price < selected.price ? "HL" : "LL"
+    ZigzagPivot pivot = ZigzagPivot.new(selected.price, selected.tm, selected.index, selected.isHigh, selected.oppositeWick, kind)
+    pivots.push(pivot)
+
+    if pivots.size() > 4
+        pivots.shift()
+    pivot
+
+float pivotHighPrice = ta.pivothigh(pivotPeriod, pivotPeriod)
+float pivotLowPrice = ta.pivotlow(pivotPeriod, pivotPeriod)
+var ZigzagPivot rawHigh = na
+var ZigzagPivot rawLow = na
+var array<ZigzagPivot> zigzagPivots = array.new<ZigzagPivot>()
+var line zigzagLine = na
+var array<StructureCandle> pendingCandles = array.new<StructureCandle>()
+var int pendingHead = 0
+var array<BmsLeg> activeLegs = array.new<BmsLeg>()
+var StructureCandle firstFvgCandle = na
+var StructureCandle secondFvgCandle = na
+var array<OrderBlockCandidate> orderBlockCandidates = array.new<OrderBlockCandidate>()
+
+type Correction
+    float threshold = na
+    int closeCount = 0
+
+method observe(Correction correction, float candleClose, float wick, bool upward) =>
+    if not na(correction.threshold) and correction.closeCount < closesRequired
+        bool closedBeyond = upward ? candleClose > correction.threshold : candleClose < correction.threshold
+        bool wickedBeyond = upward ? wick > correction.threshold : wick < correction.threshold
+        if closedBeyond
+            correction.closeCount += 1
+        else if wickedBeyond
+            correction.threshold := wick
+    correction.closeCount
+
+var array<float> highSinceLow = array.new<float>()
+var array<float> lowSinceHigh = array.new<float>()
+var array<float> loP = array.new<float>()
+var array<int> loT = array.new<int>()
+var array<int> loB = array.new<int>()
+var array<float> hiP = array.new<float>()
+var array<int> hiT = array.new<int>()
+var array<int> hiB = array.new<int>()
+
+pushPivot(array<float> prices, array<int> times, array<int> bars, array<float> legExtremes, float price, int tm, int bi, float oppositeWick) =>
+    prices.push(price)
+    times.push(tm)
+    bars.push(bi)
+    legExtremes.push(oppositeWick)
+    if prices.size() > 300
+        prices.shift()
+        times.shift()
+        bars.shift()
+        legExtremes.shift()
+
+
+pickProtected(bool lowSide, int fromBar, int toBar) =>
+    array<float> p = loP
+    array<int> t = loT
+    array<int> b = loB
+    array<float> extremes = highSinceLow
+    if not lowSide
+        p := hiP
+        t := hiT
+        b := hiB
+        extremes := lowSinceHigh
+    float rp = na
+    int rt = na
+    int rb = na
+    float waveEnd = na
+    float runningExtreme = na
+    int sz = p.size()
+    if sz > 0
+        for i = sz - 1 to 0
+            int pb = b.get(i)
+            float segmentExtreme = extremes.get(i)
+            runningExtreme := na(runningExtreme) ? segmentExtreme : (lowSide ? math.max(runningExtreme, segmentExtreme) : math.min(runningExtreme, segmentExtreme))
+            if pb > fromBar and pb < toBar
+                float pp = p.get(i)
+                bool take = na(rp) or (lowSide ? pp < rp : pp > rp)
+                if take
+                    rp := pp
+                    rt := t.get(i)
+                    rb := pb
+                    waveEnd := runningExtreme
+    [rp, rt, rb, waveEnd]
+
+var float swingHigh = na
+var int swingHighTime = na
+var int swingHighBar = na
+var float swingLow = na
+var int swingLowTime = na
+var int swingLowBar = na
+var float previousSwingHigh = na
+var float previousSwingLow = na
+
+var float windowHigh = na
+var int windowHighTime = na
+var int windowHighBar = na
+var float windowLow = na
+var int windowLowTime = na
+var int windowLowBar = na
+
+
+var int direction = 0
+var int nextReferenceFrom = 0
+var float protectedPrice = na
+var int protectedTime = na
+var int protectedBar = na
+var Correction highCorrection = Correction.new()
+var Correction lowCorrection = Correction.new()
+
+type BmsBreak
+    float wickLevel = na
+    float referencePrice = na
+    int referenceTime = na
+    int referenceBar = na
+
+method confirm(BmsBreak bms, bool upward, bool crossed, bool correctionReady, float wick, float candleClose, float referencePrice, int referenceTime, int referenceBar) =>
+    bool confirmed = false
+    if not na(bms.wickLevel)
+        confirmed := correctionReady and (upward ? candleClose > bms.wickLevel : candleClose < bms.wickLevel)
+        if not confirmed
+            bms.wickLevel := upward ? math.max(bms.wickLevel, wick) : math.min(bms.wickLevel, wick)
+    else if crossed and correctionReady
+        bms.referencePrice := referencePrice
+        bms.referenceTime := referenceTime
+        bms.referenceBar := referenceBar
+        confirmed := upward ? candleClose > referencePrice : candleClose < referencePrice
+        if not confirmed
+            bms.wickLevel := wick
+    confirmed
+
+var BmsBreak bullishBms = BmsBreak.new()
+var BmsBreak bearishBms = BmsBreak.new()
+
+bool hp = not na(pivotHighPrice)
+bool lp = not na(pivotLowPrice)
+int sourceIndex = bar_index - pivotPeriod
+int sourceTime = time[pivotPeriod]
+float sourceHigh = high[pivotPeriod]
+float sourceLow = low[pivotPeriod]
+float sourceClose = close[pivotPeriod]
+ZigzagPivot tail = zigzagPivots.size() > 0 ? zigzagPivots.last() : na
+ZigzagPivot finalizedPivot = na
+
+if hp or lp
+    if hp
+        rawHigh := ZigzagPivot.new(pivotHighPrice, sourceTime, sourceIndex, true, sourceLow)
+    if lp
+        rawLow := ZigzagPivot.new(pivotLowPrice, sourceTime, sourceIndex, false, sourceHigh)
+
+    [selected, replaceTail] = selectZigzagPivot(tail, rawHigh, rawLow, hp, lp, close)
+    if not na(selected) and (na(tail) or selected.index > tail.index)
+        if replaceTail
+            zigzagPivots.pop()
+        else
+            finalizedPivot := tail
+        tail := appendZigzagPivot(zigzagPivots, selected)
+
+        int zzCount = zigzagPivots.size()
+        if zzCount >= 2
+            ZigzagPivot previous = zigzagPivots.get(zzCount - 2)
+            bool useBarIndex = bar_index - previous.index <= maxDrawingOffset
+            string drawingXloc = useBarIndex ? xloc.bar_index : xloc.bar_time
+            int startX = useBarIndex ? previous.index : previous.tm
+            int endX = useBarIndex ? tail.index : tail.tm
+            if replaceTail and not na(zigzagLine)
+                line.set_xloc(zigzagLine, startX, endX, drawingXloc)
+                line.set_y2(zigzagLine, tail.price)
+            else
+                zigzagLine := line.new(startX, previous.price, endX, tail.price, xloc = drawingXloc, color = lineColor, style = zigzagStyle, width = lineWidth)
+
+if barstate.isconfirmed and not na(tail)
+    pendingCandles.push(StructureCandle.new(sourceIndex, sourceTime, sourceHigh, sourceLow, sourceClose, open[pivotPeriod]))
+
+    
+    while pendingHead < pendingCandles.size()
+        StructureCandle candle = pendingCandles.get(pendingHead)
+        if candle.index > tail.index
+            break
+        int structureBar = candle.index
+        int structureTime = candle.tm
+        float structureHigh = candle.highPrice
+        float structureLow = candle.lowPrice
+        float structureClose = candle.closePrice
+        OrderBlockCandidate newCandidate = na
+        if (showOrderBlocks or showFvgBoxes) and not na(firstFvgCandle) and not na(secondFvgCandle)
+            if firstFvgCandle.index + 1 == secondFvgCandle.index and secondFvgCandle.index + 1 == structureBar
+                bool bullishFvg = firstFvgCandle.closePrice < firstFvgCandle.openPrice and secondFvgCandle.closePrice > secondFvgCandle.openPrice and structureClose > candle.openPrice and structureLow > firstFvgCandle.highPrice
+                bool bearishFvg = firstFvgCandle.closePrice > firstFvgCandle.openPrice and secondFvgCandle.closePrice < secondFvgCandle.openPrice and structureClose < candle.openPrice and structureHigh < firstFvgCandle.lowPrice
+                if bullishFvg or bearishFvg
+                    float gapTop = bullishFvg ? structureLow : firstFvgCandle.lowPrice
+                    float gapBottom = bullishFvg ? firstFvgCandle.highPrice : structureHigh
+                    newCandidate := OrderBlockCandidate.new(firstFvgCandle.index, firstFvgCandle.tm, firstFvgCandle.highPrice, firstFvgCandle.lowPrice, bullishFvg, structureTime, gapTop, gapBottom, structureBar)
+                    orderBlockCandidates.push(newCandidate)
+                    if orderBlockCandidates.size() > 200
+                        orderBlockCandidates.shift()
+        firstFvgCandle := secondFvgCandle
+        secondFvgCandle := candle
+
+        if activeBlocks.size() > 0
+            for i = activeBlocks.size() - 1 to 0
+                OrderBlockCandidate drawnBlock = activeBlocks.get(i)
+                drawnBlock.mitigate(structureBar, structureTime, structureHigh, structureLow, structureClose)
+                if drawnBlock.mitigated or na(drawnBlock.blockBox)
+                    activeBlocks.remove(i)
+        for block in orderBlockCandidates
+            block.mitigate(structureBar, structureTime, structureHigh, structureLow, structureClose)
+        for leg in activeLegs
+            for block in leg.candidates
+                if not block.displayed or na(block.blockBox)
+                    block.mitigate(structureBar, structureTime, structureHigh, structureLow, structureClose)
+
+        bool useWindowReference = direction != 0
+
+        if not na(finalizedPivot) and finalizedPivot.index < structureBar
+            float pivotHigh = finalizedPivot.isHigh ? finalizedPivot.price : na
+            float pivotLow = finalizedPivot.isHigh ? na : finalizedPivot.price
+            int pivotTime = finalizedPivot.tm
+            int pivotBar = finalizedPivot.index
+            if activeLegs.size() > 0
+                for i = activeLegs.size() - 1 to 0
+                    BmsLeg leg = activeLegs.get(i)
+                    if pivotBar >= leg.breakBar and finalizedPivot.isHigh == leg.bullish
+                        leg.extreme := finalizedPivot.price
+                        leg.rightTime := pivotTime
+                        leg.refresh()
+                        activeLegs.remove(i)
+
+            float finalizedOppositeWick = finalizedPivot.oppositeWick
+            finalizedPivot := na
+            if not na(pivotHigh)
+                pushPivot(hiP, hiT, hiB, lowSinceHigh, pivotHigh, pivotTime, pivotBar, finalizedOppositeWick)
+            else
+                pushPivot(loP, loT, loB, highSinceLow, pivotLow, pivotTime, pivotBar, finalizedOppositeWick)
+
+            if pivotBar >= nextReferenceFrom
+                if not na(pivotHigh)
+                    bool newWindowHigh = na(windowHigh) or (direction != 1 and pivotHigh > windowHigh)
+                    if newWindowHigh
+                        windowHigh := pivotHigh
+                        windowHighTime := pivotTime
+                        windowHighBar := pivotBar
+                    swingHigh := pivotHigh
+                    swingHighTime := pivotTime
+                    swingHighBar := pivotBar
+                    previousSwingHigh := hiP.size() > 1 ? hiP.get(hiP.size() - 2) : na
+                    if direction >= 0 and na(bullishBms.wickLevel) and (not useWindowReference or newWindowHigh)
+                        highCorrection := Correction.new(pivotHigh)
+                else
+                    bool newWindowLow = na(windowLow) or (direction != -1 and pivotLow < windowLow)
+                    if newWindowLow
+                        windowLow := pivotLow
+                        windowLowTime := pivotTime
+                        windowLowBar := pivotBar
+                    swingLow := pivotLow
+                    swingLowTime := pivotTime
+                    swingLowBar := pivotBar
+                    previousSwingLow := loP.size() > 1 ? loP.get(loP.size() - 2) : na
+                    if direction <= 0 and na(bearishBms.wickLevel) and (not useWindowReference or newWindowLow)
+                        lowCorrection := Correction.new(pivotLow)
+
+        if highSinceLow.size() > 0
+            int lastLowIndex = highSinceLow.size() - 1
+            highSinceLow.set(lastLowIndex, math.max(highSinceLow.get(lastLowIndex), structureHigh))
+        if lowSinceHigh.size() > 0
+            int lastHighIndex = lowSinceHigh.size() - 1
+            lowSinceHigh.set(lastHighIndex, math.min(lowSinceHigh.get(lastHighIndex), structureLow))
+
+        for leg in activeLegs
+            bool addedCandidate = not na(newCandidate) and leg.accepts(newCandidate)
+            if addedCandidate
+                leg.candidates.push(newCandidate.copy())
+            float nextExtreme = leg.bullish ? structureHigh : structureLow
+            bool extended = leg.bullish ? nextExtreme > leg.extreme : nextExtreme < leg.extreme
+            if extended
+                leg.extreme := nextExtreme
+                leg.rightTime := structureTime
+            if extended or addedCandidate
+                leg.refresh()
+
+        bool highReady = highCorrection.closeCount >= closesRequired
+        bool lowReady = lowCorrection.closeCount >= closesRequired
+        float bmsHigh = useWindowReference ? windowHigh : swingHigh
+        float bmsLow = useWindowReference ? windowLow : swingLow
+        int bmsHighBar = useWindowReference ? windowHighBar : swingHighBar
+        int bmsLowBar = useWindowReference ? windowLowBar : swingLowBar
+        int bmsHighTime = useWindowReference ? windowHighTime : swingHighTime
+        int bmsLowTime = useWindowReference ? windowLowTime : swingLowTime
+
+        float highPullbackReference = na(protectedPrice) ? previousSwingHigh : protectedPrice
+        float lowPullbackReference = na(protectedPrice) ? previousSwingLow : protectedPrice
+        bool hasLowerHigh = not na(swingHigh) and not na(bmsLowBar) and swingHighBar > bmsLowBar and not na(highPullbackReference) and swingHigh < highPullbackReference
+        bool hasHigherLow = not na(swingLow) and not na(bmsHighBar) and swingLowBar > bmsHighBar and not na(lowPullbackReference) and swingLow > lowPullbackReference
+
+        bool bullishContinuation = direction == 1 and hasHigherLow and structureHigh > bmsHigh
+        bool bearishContinuation = direction == -1 and hasLowerHigh and structureLow < bmsLow
+        bool highBroken = not na(bmsHigh) and (direction == 0 ? structureHigh > bmsHigh : bullishContinuation)
+        bool lowBroken = not na(bmsLow) and (direction == 0 ? structureLow < bmsLow : bearishContinuation)
+        bool bearishChange = direction == 1 and not na(protectedPrice) and structureLow <= protectedPrice
+        bool bullishChange = direction == -1 and not na(protectedPrice) and structureHigh >= protectedPrice
+        bool isChange = bearishChange or bullishChange
+
+        highCorrection.observe(structureClose, structureLow, false)
+        lowCorrection.observe(structureClose, structureHigh, true)
+
+        int eventDirection = 0
+        if isChange
+            eventDirection := -direction
+        else
+            bool bullishConfirmed = bullishBms.confirm(true, highBroken, highReady, structureHigh, structureClose, bmsHigh, bmsHighTime, bmsHighBar)
+            bool bearishConfirmed = bearishBms.confirm(false, lowBroken, lowReady, structureLow, structureClose, bmsLow, bmsLowTime, bmsLowBar)
+            if bullishConfirmed != bearishConfirmed
+                eventDirection := bullishConfirmed ? 1 : -1
+
+        if eventDirection != 0
+            bool bullish = eventDirection == 1
+            BmsBreak bms = bullish ? bullishBms : bearishBms
+            float levelPrice = isChange ? protectedPrice : nz(bms.wickLevel, bms.referencePrice)
+            int levelTime = isChange ? protectedTime : bms.referenceTime
+            int levelBar = isChange ? protectedBar : bms.referenceBar
+            color eventColor = isChange ? pink : lightBlue
+
+            int spanBars = bar_index - levelBar
+            bool useBarIndex = structureBar - levelBar >= 8 and spanBars <= maxDrawingOffset
+            string drawingXloc = useBarIndex ? xloc.bar_index : xloc.bar_time
+            int startX = useBarIndex ? levelBar : levelTime
+            int endX = useBarIndex ? structureBar : structureTime
+            int spanX = endX - startX
+            int centerX = startX + int(spanX * 0.5)
+            int halfGap = math.max(1, int(spanX * 0.05))
+
+            line.new(startX, levelPrice, centerX - halfGap, levelPrice, xloc = drawingXloc, color = eventColor)
+            line.new(centerX + halfGap, levelPrice, endX, levelPrice, xloc = drawingXloc, color = eventColor)
+            label.new(centerX, levelPrice, isChange ? "CHoCH" : "BMS", xloc = drawingXloc, yloc = yloc.price, style = label.style_label_center, color = color.new(eventColor, 100), textcolor = eventColor, size = size.small)
+
+            [originPrice, originTime, originBar, waveEnd] = pickProtected(bullish, levelBar, structureBar)
+            bool hasOrigin = not na(originPrice) and originBar > levelBar and originBar < structureBar
+            if (showBmsRange or showOrderBlocks or showFvgBoxes) and not isChange and hasOrigin and not na(waveEnd)
+                box searchZone = na
+                if showBmsRange
+                    searchZone := box.new(originTime, originPrice, structureTime, originPrice, xloc = xloc.bar_time, border_color = color.new(lightBlue, 45), bgcolor = color.new(lightBlue, 88))
+                BmsLeg leg = BmsLeg.new(bullish, structureBar, originBar, originPrice, waveEnd, structureTime, searchZone, array.new<OrderBlockCandidate>())
+                for candidate in orderBlockCandidates
+                    if leg.accepts(candidate)
+                        leg.candidates.push(candidate.copy())
+                leg.refresh()
+                activeLegs.push(leg)
+            orderBlockCandidates.clear()
+
+            if hasOrigin
+                protectedPrice := originPrice
+                protectedTime := originTime
+                protectedBar := originBar
+            else if isChange
+                protectedPrice := na
+                protectedTime := na
+                protectedBar := na
+
+            direction := eventDirection
+            nextReferenceFrom := structureBar
+            swingHigh := na
+            swingLow := na
+            previousSwingHigh := na
+            previousSwingLow := na
+            windowHigh := na
+            windowLow := na
+            windowHighBar := na
+            windowLowBar := na
+            highCorrection := Correction.new()
+            lowCorrection := Correction.new()
+            bullishBms := BmsBreak.new()
+            bearishBms := BmsBreak.new()
+
+        pendingHead += 1
+
+    if pendingHead == pendingCandles.size()
+        pendingCandles.clear()
+        pendingHead := 0
+    else if pendingHead >= 512 and pendingHead * 2 >= pendingCandles.size()
+        pendingCandles := array.copy(array.slice(pendingCandles, pendingHead, pendingCandles.size()))
+        pendingHead := 0
+
+color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
+bgcolor(color.new(trendColor, 90))
