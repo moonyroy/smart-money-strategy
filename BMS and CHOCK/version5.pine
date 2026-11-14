@@ -1,5 +1,5 @@
 //@version=6
-indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 pivotPeriod = input.int(5, "Pivot Period", minval = 1, maxval = 4999, tooltip = "Structure uses finalized Zig Zag pivots. A signal is drawn on its original break candle once the required pivots are final.")
 closesRequired = input.int(3, "Required Correction Closes (all BMS)", minval = 1, maxval = 20, tooltip = "Number of candle closes in the correction direction required before a BMS can be confirmed. Applied to every BMS.")
@@ -163,7 +163,7 @@ pickProtected(bool lowSide, int fromBar, int toBar) =>
             int pb = b.get(i)
             if pb > fromBar and pb < toBar
                 float pp = p.get(i)
-                bool take = na(rp) or (lowSide ? pp < rp : pp > rp)
+                bool take = na(rp) or (lowSide ? pp <= rp : pp >= rp)
                 if take
                     rp := pp
                     rt := t.get(i)
@@ -186,13 +186,8 @@ var float windowLow = na
 var int windowLowTime = na
 var int windowLowBar = na
 
-var float lowSinceWindowHigh = na
-var int lowSinceWindowHighTime = na
-var int lowSinceWindowHighBar = na
-var float highSinceWindowLow = na
-var int highSinceWindowLowTime = na
-var int highSinceWindowLowBar = na
 
+var box trendBackground = na
 var int direction = 0
 var int nextReferenceFrom = 0
 var float protectedPrice = na
@@ -296,7 +291,6 @@ if barstate.isconfirmed and not na(tail)
                         windowHigh := pivotHigh
                         windowHighTime := pivotTime
                         windowHighBar := pivotBar
-                        lowSinceWindowHigh := na
                     swingHigh := pivotHigh
                     swingHighTime := pivotTime
                     swingHighBar := pivotBar
@@ -309,7 +303,6 @@ if barstate.isconfirmed and not na(tail)
                         windowLow := pivotLow
                         windowLowTime := pivotTime
                         windowLowBar := pivotBar
-                        highSinceWindowLow := na
                     swingLow := pivotLow
                     swingLowTime := pivotTime
                     swingLowBar := pivotBar
@@ -372,19 +365,7 @@ if barstate.isconfirmed and not na(tail)
             line.new(centerX + halfGap, levelPrice, endX, levelPrice, xloc = drawingXloc, color = eventColor)
             label.new(centerX, levelPrice, isChange ? "CHoCH" : "BMS", xloc = drawingXloc, yloc = yloc.price, style = label.style_label_center, color = color.new(eventColor, 100), textcolor = eventColor, size = size.small)
 
-            float originPrice = na
-            int originTime = na
-            int originBar = na
-            bool isContinuation = not isChange and useWindowReference
-            if isContinuation
-                originPrice := bullish ? lowSinceWindowHigh : highSinceWindowLow
-                originTime := bullish ? lowSinceWindowHighTime : highSinceWindowLowTime
-                originBar := bullish ? lowSinceWindowHighBar : highSinceWindowLowBar
-            else
-                [pickPrice, pickTime, pickBar] = pickProtected(bullish, levelBar, structureBar)
-                originPrice := pickPrice
-                originTime := pickTime
-                originBar := pickBar
+            [originPrice, originTime, originBar] = pickProtected(bullish, levelBar, structureBar)
             bool hasOrigin = not na(originPrice) and originBar > levelBar and originBar < structureBar
             if hasOrigin
                 protectedPrice := originPrice
@@ -394,6 +375,13 @@ if barstate.isconfirmed and not na(tail)
                 protectedPrice := na
                 protectedTime := na
                 protectedBar := na
+
+            if direction != eventDirection
+                if not na(trendBackground)
+                    box.set_right(trendBackground, structureTime)
+                    box.set_extend(trendBackground, extend.none)
+                color trendColor = bullish ? lightBlue : pink
+                trendBackground := box.new(structureTime, 1e20, structureTime + 1, -1e20, border_color = na, extend = extend.right, xloc = xloc.bar_time, bgcolor = color.new(trendColor, 90))
 
             direction := eventDirection
             nextReferenceFrom := structureBar
@@ -405,21 +393,10 @@ if barstate.isconfirmed and not na(tail)
             windowLow := na
             windowHighBar := na
             windowLowBar := na
-            lowSinceWindowHigh := na
-            highSinceWindowLow := na
             highCorrection := Correction.new()
             lowCorrection := Correction.new()
             bullishBms := BmsBreak.new()
             bearishBms := BmsBreak.new()
-        else
-            if not na(windowHigh) and (na(lowSinceWindowHigh) or structureLow < lowSinceWindowHigh)
-                lowSinceWindowHigh := structureLow
-                lowSinceWindowHighTime := structureTime
-                lowSinceWindowHighBar := structureBar
-            if not na(windowLow) and (na(highSinceWindowLow) or structureHigh > highSinceWindowLow)
-                highSinceWindowLow := structureHigh
-                highSinceWindowLowTime := structureTime
-                highSinceWindowLowBar := structureBar
 
         pendingHead += 1
 
@@ -430,5 +407,3 @@ if barstate.isconfirmed and not na(tail)
         pendingCandles := array.copy(array.slice(pendingCandles, pendingHead, pendingCandles.size()))
         pendingHead := 0
 
-color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
-bgcolor(color.new(trendColor, 90), title = "Trend Background")
