@@ -1,5 +1,5 @@
 //@version=6
-indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator("❤️🍭🐰", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 pivotPeriod = input.int(5, "Pivot Period", minval = 1, maxval = 4999, tooltip = "Structure uses finalized Zig Zag pivots. A signal is drawn on its original break candle once the required pivots are final.")
 closesRequired = input.int(3, "Required Correction Closes (all BMS)", minval = 1, maxval = 20, tooltip = "Number of candle closes in the correction direction required before a BMS can be confirmed. Applied to every BMS.")
@@ -195,6 +195,12 @@ var int highSinceWindowLowTime = na
 var int highSinceWindowLowBar = na
 
 var int direction = 0
+var array<box> bgBoxes = array.new<box>()
+var box activeBgBox = na
+var float allHi = na
+var float allLo = na
+allHi := na(allHi) ? high : math.max(allHi, high)
+allLo := na(allLo) ? low : math.min(allLo, low)
 var int nextReferenceFrom = 0
 var float protectedPrice = na
 var int protectedTime = na
@@ -293,7 +299,8 @@ if barstate.isconfirmed and not na(tail)
 
             if pivotBar >= nextReferenceFrom
                 if not na(pivotHigh)
-                    bool newWindowHigh = na(windowHigh) or (direction != 1 and pivotHigh > windowHigh)
+                    // FIX: move the window to a higher pivot in any direction, unless a wick-only BMS is already pending
+                    bool newWindowHigh = na(windowHigh) or (pivotHigh > windowHigh and na(bullishBms.wickLevel))
                     if newWindowHigh
                         windowHigh := pivotHigh
                         windowHighTime := pivotTime
@@ -306,7 +313,8 @@ if barstate.isconfirmed and not na(tail)
                     if direction >= 0 and na(bullishBms.wickLevel) and (not useWindowReference or newWindowHigh)
                         highCorrection := Correction.new(correctionStart)
                 else
-                    bool newWindowLow = na(windowLow) or (direction != -1 and pivotLow < windowLow)
+                    // FIX: mirror for the low side
+                    bool newWindowLow = na(windowLow) or (pivotLow < windowLow and na(bearishBms.wickLevel))
                     if newWindowLow
                         windowLow := pivotLow
                         windowLowTime := pivotTime
@@ -397,6 +405,15 @@ if barstate.isconfirmed and not na(tail)
                 protectedTime := na
                 protectedBar := na
 
+            // Background: close the previous box and open a new one on the real event candle
+            if eventDirection != direction
+                if not na(activeBgBox)
+                    box.set_right(activeBgBox, structureTime)
+                activeBgBox := box.new(structureTime, allHi, structureTime, allLo, xloc = xloc.bar_time, border_color = color.new(color.white, 100), bgcolor = color.new(eventDirection == 1 ? lightBlue : pink, 90))
+                bgBoxes.push(activeBgBox)
+                if bgBoxes.size() > 500
+                    bgBoxes.shift()
+
             direction := eventDirection
             nextReferenceFrom := structureBar
             swingHigh := na
@@ -432,5 +449,9 @@ if barstate.isconfirmed and not na(tail)
         pendingCandles := array.copy(array.slice(pendingCandles, pendingHead, pendingCandles.size()))
         pendingHead := 0
 
-color trendColor = direction == 1 ? lightBlue : direction == -1 ? pink : na
-bgcolor(color.new(trendColor, 90), title = "Trend Background")
+if barstate.islast
+    if not na(activeBgBox)
+        box.set_right(activeBgBox, time)
+    for b in bgBoxes
+        box.set_top(b, allHi)
+        box.set_bottom(b, allLo)
