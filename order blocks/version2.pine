@@ -11,7 +11,6 @@ showBmsBox = input.bool(true, "Show BMS Boxes")
 showFvg = input.bool(true, "Show FVGs", tooltip = "Shows same-direction three-candle gaps inside the time span and price bounds of the structure box.")
 boxOnChoch = input.bool(false, "Also draw boxes on CHoCH")
 boxZone = input.string("Up to 50%", "Box Height", options = ["Up to 50%", "Full range (0 - 1)"], tooltip = "Up to 50%: bullish box covers point 1 to the 0.5 level (Discount), bearish box covers the 0.5 level to point 1 (Premium).")
-boxBars = input.int(20, "Box Length (candles)", minval = 1, maxval = 500, tooltip = "Number of candles the box extends after the break.")
 zigzagStyle = lineStyleStr == "Dotted" ? line.style_dotted : lineStyleStr == "Dashed" ? line.style_dashed : line.style_solid
 
 color lightBlue = color.rgb(100, 200, 255)
@@ -263,23 +262,21 @@ type Fvg
 
 var array<Fvg> fvgCandidates = array.new<Fvg>()
 
-drawLegFvgs(array<Fvg> candidates, int dir, int originBar, int extremeBar, int breakBar, float hi, float lo) =>
+drawLegFvgs(array<Fvg> candidates, int dir, int originBar, int extremeBar, float hi, float lo) =>
     if showFvg and dir != 0 and not na(originBar) and not na(extremeBar) and not na(hi) and not na(lo) and candidates.size() > 0
         float mid = (hi + lo) / 2
         float boxTop = boxZone == "Up to 50%" and dir == 1 ? mid : hi
         float boxBottom = boxZone == "Up to 50%" and dir == -1 ? mid : lo
         int leftBar = math.max(originBar, bar_index - maxDrawingOffset)
-        int rightBar = math.min(breakBar + boxBars, bar_index + 500)
-        int lastPatternBar = math.min(extremeBar, rightBar)
         for i = candidates.size() - 1 to 0
             Fvg gap = candidates.get(i)
             if gap.firstBar < leftBar
                 break
             bool withinBoxPrice = gap.bottom >= boxBottom and gap.top <= boxTop
             bool matchesLegDirection = gap.bullish == (dir == 1)
-            if matchesLegDirection and gap.firstBar + 2 <= lastPatternBar and withinBoxPrice
+            if matchesLegDirection and gap.firstBar + 2 <= extremeBar and withinBoxPrice
                 color gapColor = gap.bullish ? color.teal : color.red
-                box.new(gap.firstBar, gap.top, rightBar, gap.bottom, xloc = xloc.bar_index, border_color = color.new(gapColor, 55), bgcolor = color.new(gapColor, 91), text = "FVG", text_color = gapColor, text_size = size.tiny)
+                box.new(gap.firstBar, gap.top, extremeBar, gap.bottom, xloc = xloc.bar_index, border_color = color.new(gapColor, 55), bgcolor = color.new(gapColor, 91), text = "FVG", text_color = gapColor, text_size = size.tiny)
     0
 
 int sourceIndex = bar_index - pivotPeriod
@@ -368,7 +365,7 @@ if barstate.isconfirmed and not na(tail) and candleOk
                 // First pullback pivot after the event freezes point 0 of the range
                 if (na(pivotHigh) and direction == 1) or (not na(pivotHigh) and direction == -1)
                     if not rangeFrozen
-                        drawLegFvgs(fvgCandidates, direction, legOriginBar, legExtremeBar, nextReferenceFrom, rangeHigh, rangeLow)
+                        drawLegFvgs(fvgCandidates, direction, legOriginBar, legExtremeBar, rangeHigh, rangeLow)
                     rangeFrozen := true
                 // This pivot has already been observed as a candle. Its close can count,
                 // but candles after it belong to a different leg.
@@ -486,7 +483,7 @@ if barstate.isconfirmed and not na(tail) and candleOk
                 protectedBar := na
 
             if not rangeFrozen
-                drawLegFvgs(fvgCandidates, direction, legOriginBar, legExtremeBar, nextReferenceFrom, rangeHigh, rangeLow)
+                drawLegFvgs(fvgCandidates, direction, legOriginBar, legExtremeBar, rangeHigh, rangeLow)
             legOriginBar := hasOrigin and (not isChange or boxOnChoch) ? originBar : na
             legExtremeBar := not na(legOriginBar) ? structureBar : na
 
@@ -507,7 +504,7 @@ if barstate.isconfirmed and not na(tail) and candleOk
             rangeFrozen := false
             if showBmsBox and hasOrigin and (not isChange or boxOnChoch)
                 int boxLeft = math.max(originBar, bar_index - maxDrawingOffset)
-                int boxRight = math.min(structureBar + boxBars, bar_index + 500)
+                int boxRight = legExtremeBar
                 float rangeMid = (rangeHigh + rangeLow) / 2
                 float boxTop = boxZone == "Up to 50%" and bullish ? rangeMid : rangeHigh
                 float boxBottom = boxZone == "Up to 50%" and not bullish ? rangeMid : rangeLow
@@ -556,12 +553,14 @@ if barstate.isconfirmed and not na(tail) and candleOk
                     if not na(legOriginBar)
                         legExtremeBar := structureBar
                     if not na(lastBmsBox)
+                        box.set_right(lastBmsBox, legExtremeBar)
                         box.set_top(lastBmsBox, boxZone == "Up to 50%" ? (rangeHigh + rangeLow) / 2 : rangeHigh)
                 if direction == -1 and structureLow < rangeLow
                     rangeLow := structureLow
                     if not na(legOriginBar)
                         legExtremeBar := structureBar
                     if not na(lastBmsBox)
+                        box.set_right(lastBmsBox, legExtremeBar)
                         box.set_bottom(lastBmsBox, boxZone == "Up to 50%" ? (rangeHigh + rangeLow) / 2 : rangeLow)
 
         pendingHead += 1
